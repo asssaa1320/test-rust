@@ -1,0 +1,18 @@
+# .github/workflows/test.yml
+name: Test Bat Escape
+on: push
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run tests
+        run: python test_rust_bat_escape.py
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: results
+          path: "**/test_results.txt"
