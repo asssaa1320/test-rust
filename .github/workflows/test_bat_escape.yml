@@ -5,48 +5,24 @@ on: [push, workflow_dispatch]
 jobs:
   verify-bugs:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: hiero-ledger/hiero-sdk-go
 
+    steps:
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.22'
 
-      - name: Bug 1 — SetNetworkUpdatePeriod(0) infinite loop
+      - name: Setup test module
         run: |
-          cat > /tmp/test_bug1.go << 'EOF'
-          package main
-
-          import (
-            "fmt"
-            "time"
-            hiero "github.com/hiero-ledger/hiero-sdk-go/v2/sdk"
-          )
-
-          func main() {
-            client := hiero.ClientForTestnet()
-            done := make(chan bool)
-            go func() {
-              time.Sleep(3 * time.Second)
-              done <- true
-            }()
-            client.SetNetworkUpdatePeriod(0)
-            select {
-            case <-done:
-              fmt.Println("PASS: goroutine ran for 3s — check CPU usage")
-            }
-            client.Close()
-          }
-          EOF
-          cd /tmp && go mod init test && go mod tidy
-          timeout 5 go run /tmp/test_bug1.go || echo "BUG1: process killed (expected if CPU maxed)"
+          mkdir -p ~/hiero-test
+          cd ~/hiero-test
+          go mod init hiero-security-test
+          go get github.com/hiero-ledger/hiero-sdk-go/v2@latest
 
       - name: Bug 2 — ClientFromConfigWithoutScheduleNetworkUpdate NPE
         run: |
-          cat > /tmp/test_bug2_test.go << 'EOF'
-          package main_test
+          mkdir -p ~/hiero-test/bug2
+          cat > ~/hiero-test/bug2/main_test.go << 'EOF'
+          package bug2_test
 
           import (
             "testing"
@@ -56,32 +32,85 @@ jobs:
           func TestBug2_NilPointerPanic(t *testing.T) {
             defer func() {
               if r := recover(); r != nil {
-                t.Logf("BUG CONFIRMED: panic = %v", r)
+                t.Logf("BUG CONFIRMED — panic: %v", r)
               } else {
-                t.Log("No panic — bug may be fixed")
+                t.Log("No panic — possibly fixed")
               }
             }()
             badJSON := []byte(`{"network":"mainnet","mirrorNetwork":123}`)
-            _, _ = hiero.ClientFromConfigWithoutScheduleNetworkUpdate(badJSON)
+            client, err := hiero.ClientFromConfigWithoutScheduleNetworkUpdate(badJSON)
+            t.Logf("client=%v err=%v", client, err)
           }
           EOF
+          cd ~/hiero-test && go test ./bug2/ -v -run TestBug2
 
-      - name: Bug 3 — defer UpdateAddressBook in loop
+      - name: Bug 1 — SetNetworkUpdatePeriod(0) CPU loop
         run: |
-          cat > /tmp/test_bug3_test.go << 'EOF'
-          package main_test
+          mkdir -p ~/hiero-test/bug1
+          cat > ~/hiero-test/bug1/main_test.go << 'EOF'
+          package bug1_test
+
+          import (
+            "runtime"
+            "testing"
+            "time"
+            hiero "github.com/hiero-ledger/hiero-sdk-go/v2/sdk"
+          )
+
+          func TestBug1_ZeroPeriodLoop(t *testing.T) {
+            client := hiero.ClientForTestnet()
+            defer client.Close()
+
+            // قياس CPU قبل
+            var before, after runtime.MemStats
+            runtime.ReadMemStats(&before)
+            numGoroutinesBefore := runtime.NumGoroutine()
+
+            client.SetNetworkUpdatePeriod(0)
+            time.Sleep(500 * time.Millisecond)
+
+            numGoroutinesAfter := runtime.NumGoroutine()
+            runtime.ReadMemStats(&after)
+
+            t.Logf("Goroutines before: %d", numGoroutinesBefore)
+            t.Logf("Goroutines after:  %d", numGoroutinesAfter)
+            t.Logf("Heap alloc delta:  %d bytes", after.HeapAlloc-before.HeapAlloc)
+
+            if numGoroutinesAfter > numGoroutinesBefore+5 {
+              t.Logf("BUG CONFIRMED — goroutine spike: +%d", numGoroutinesAfter-numGoroutinesBefore)
+            }
+          }
+          EOF
+          cd ~/hiero-test && timeout 10 go test ./bug1/ -v -run TestBug1 -timeout 8s || echo "TIMEOUT — possible infinite loop"
+
+      - name: Bug 3 — defer in retry loop
+        run: |
+          mkdir -p ~/hiero-test/bug3
+          cat > ~/hiero-test/bug3/main_test.go << 'EOF'
+          package bug3_test
 
           import (
             "testing"
-            "sync/atomic"
             hiero "github.com/hiero-ledger/hiero-sdk-go/v2/sdk"
           )
 
           func TestBug3_DeferInLoop(t *testing.T) {
-            var updateCount atomic.Int32
-            // نُراقب عدد مرات _UpdateAddressBook
-            // إذا كان > 1 بعد execute واحد → bug confirmed
-            _ = hiero.ClientForTestnet()
-            _ = updateCount
-            t.Log("Manual check: run with maxAttempts=10 + INVALID_NODE_ACCOUNT responses")
-            t.Log("Expected: 10x UpdateAddressBook calls at end
+            // نتحقق من الكود مباشرة عبر source inspection
+            // executable.go line: defer client._UpdateAddressBook()
+            // داخل for loop → يتراكم N مرات
+
+            client := hiero.ClientForTestnet()
+            defer client.Close()
+
+            // نُشغِّل transaction لـ invalid node account → INVALID_NODE_ACCOUNT
+            _, err := hiero.NewAccountBalanceQuery().
+              SetAccountID(hiero.AccountID{Account: 999999999}).
+              SetNodeAccountIDs([]hiero.AccountID{{Account: 99}}).
+              SetMaxRetry(3).
+              Execute(client)
+
+            t.Logf("err: %v", err)
+            t.Log("Check: how many UpdateAddressBook calls happened after _Execute returned")
+          }
+          EOF
+          cd ~/hiero-test && go test ./bug3/ -v -run TestBug3 -timeout 30s
