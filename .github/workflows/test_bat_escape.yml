@@ -1,31 +1,14 @@
-name: Solve GhostCrypt - Oracle Attack
+name: Solve GhostCrypt - Deep Oracle
+
 on:
   workflow_dispatch:
 
 jobs:
-  oracle-attack:
+  crack:
     runs-on: ubuntu-latest
     steps:
 
-      # ── Step 1: جيب الـ ciphertext الجديد ──────────────────────────────
-      - name: Fetch fresh ciphertext from /summon-litany
-        run: |
-          curl -s -X POST \
-            https://ghostcrypt-2c7aa570.challenges.bsidessf.net/summon-litany \
-            > /tmp/litany.json
-          cat /tmp/litany.json
-          python3 -c "
-          import json
-          d = json.load(open('/tmp/litany.json'))
-          seq = d.get('playback_sequence', [])
-          cipher = ''.join(c for c in seq if c != ' ').upper()
-          print('CIPHER:', cipher)
-          print('LENGTH:', len(cipher))
-          open('/tmp/cipher.txt','w').write(cipher)
-          "
-
-      # ── Step 2: استخدم /invoke كـ oracle لتحديد نوع الـ cipher ─────────
-      - name: Identify cipher type via /invoke oracle
+      - name: Deep oracle analysis + crack
         run: |
           python3 - <<'EOF'
           import urllib.request, json, urllib.parse
@@ -46,192 +29,49 @@ jobs:
               seq = d.get('playback_sequence', [])
               return ''.join(c for c in seq if c != ' ').upper()
 
-          # Test 1: encrypt("aaaaaaa", "a") → should be "bbbbbbb" for Vigenere shift-1
-          r1 = invoke("aaaaaaa", "a")
-          print(f"invoke('aaaaaaa','a')     = {r1}")
-
-          # Test 2: encrypt("aaaaaaa", "b") → "ccccccc" for Vigenere
-          r2 = invoke("aaaaaaa", "b")
-          print(f"invoke('aaaaaaa','b')     = {r2}")
-
-          # Test 3: encrypt("abcdefg", "a") → "abcdefg" for Vigenere (a=shift 0)
-          r3 = invoke("abcdefg", "a")
-          print(f"invoke('abcdefg','a')     = {r3}")
-
-          # Test 4: encrypt("abcdefg", "abc") → Vigenere: a+a=a, b+b=d, c+c=e, d+a=d...
-          r4 = invoke("abcdefg", "abc")
-          print(f"invoke('abcdefg','abc')   = {r4}")
-
-          # Test 5: double-encrypt to detect Beaufort/XOR-based
-          r5 = invoke(r1.lower(), "a")
-          print(f"invoke(r1.lower(),'a')   = {r5}  (double encrypt of 'aaaa' with 'a')")
-
-          # Save results
-          with open('/tmp/oracle.txt', 'w') as f:
-              f.write(f"r1={r1}\nr2={r2}\nr3={r3}\nr4={r4}\nr5={r5}\n")
-          EOF
-
-      # ── Step 3: اشتق الـ key من الـ oracle results ──────────────────────
-      - name: Derive key and decrypt flag
-        run: |
-          python3 - <<'EOF'
-          import json
-
-          cipher = open('/tmp/cipher.txt').read().strip()
-          oracle = dict(line.split('=',1) for line in open('/tmp/oracle.txt').read().strip().splitlines())
-          r1 = oracle['r1']  # encrypt("aaaaaaa","a")
-          r3 = oracle['r3']  # encrypt("abcdefg","a")
-
-          print(f"Cipher: {cipher}")
-          print(f"Oracle r1 (aaa,a): {r1}")
-          print(f"Oracle r3 (abc,a): {r3}")
-
-          # Determine shift for arcana='a'
-          if r1 and r1[0] == 'B':
-              print("Cipher type: Vigenere (a+a=B)")
-              shift_a = ord(r1[0]) - ord('A')  # should be 1
-              print(f"arcana 'a' adds shift: {shift_a}")
-          elif r1 and r1[0] == 'A':
-              print("Cipher type: identity when arcana='a' (shift 0)")
-              shift_a = 0
-
-          # The /invoke oracle uses USER arcana
-          # /summon-litany uses SERVER secret arcana
-          # We need to find the server arcana
-          #
-          # Strategy: send incantation = cipher.lower(), arcana = every 3-letter combo
-          # Compare output to known flag prefix patterns
-          # OR: send the cipher as incantation with arcana = neg_key candidates
-
-          # Vigenere decrypt: P = (C - K + 26) % 26
-          def vig_dec(c, k):
-              k = k.upper()
-              result = []
-              ki = 0
-              for ch in c:
-                  if ch.isalpha():
-                      p = (ord(ch) - ord('A') - (ord(k[ki % len(k)]) - ord('A')) + 26) % 26
-                      result.append(chr(p + ord('a')))
-                      ki += 1
-              return ''.join(result)
-
-          def vig_enc(p, k):
-              k = k.upper()
-              result = []
-              ki = 0
-              for ch in p:
-                  if ch.isalpha():
-                      c = (ord(ch.upper()) - ord('A') + ord(k[ki % len(k)]) - ord('A')) % 26
-                      result.append(chr(c + ord('A')))
-                      ki += 1
-              return ''.join(result)
-
-          # Kasiski: find repeated patterns to estimate key length
-          def kasiski(ct, min_len=2, max_len=5):
-              import re
-              from math import gcd
-              from functools import reduce
-              distances = []
-              for plen in range(min_len, max_len+1):
-                  for i in range(len(ct) - plen):
-                      pat = ct[i:i+plen]
-                      for j in range(i+plen, len(ct)-plen+1):
-                          if ct[j:j+plen] == pat:
-                              distances.append(j - i)
-              if not distances:
-                  return None
-              return reduce(gcd, distances)
-
-          kl = kasiski(cipher)
-          print(f"Kasiski estimated key length: {kl}")
-
-          # Brute force all keys of estimated length
-          from itertools import product
-          import string
-
-          klen = kl if kl and 1 <= kl <= 5 else 3
-          print(f"Brute-forcing key length: {klen} ({26**klen} combinations)")
-
-          # Score by English frequency
-          freq = {'e':12.7,'t':9.1,'a':8.2,'o':7.5,'i':7.0,'n':6.7,'s':6.3,
-                  'h':6.1,'r':6.0,'d':4.3,'l':4.0,'c':2.8,'u':2.8,'m':2.4,
-                  'w':2.4,'f':2.2,'g':2.0,'y':2.0,'p':1.9,'b':1.5}
-
-          best = []
-          for combo in product(string.ascii_uppercase, repeat=klen):
-              k = ''.join(combo)
-              pt = vig_dec(cipher, k)
-              score = sum(freq.get(c, 0.1) for c in pt)
-              best.append((score, k, pt))
-
-          best.sort(reverse=True)
-          print("\nTop 20 candidates:")
-          for score, k, pt in best[:20]:
-              print(f"  key={k}  score={score:.1f}  pt={pt}")
-
-          print(f"\nBEST FLAG: CTF{{{best[0][2]}}}")
-          EOF
-
-      # ── Step 4: استخدم /invoke للتحقق من الـ flag ─────────────────────
-      - name: Verify flag via invoke oracle
-        run: |
-          python3 - <<'EOF'
-          import urllib.request, json, urllib.parse
-
-          BASE = "https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
-
-          def invoke(incantation, arcana):
-              data = urllib.parse.urlencode({
-                  'incantation': incantation,
-                  'arcana': arcana
-              }).encode()
-              req = urllib.request.Request(
-                  BASE + "/invoke", data=data,
-                  headers={'Content-Type': 'application/x-www-form-urlencoded'}
-              )
+          def litany():
+              req = urllib.request.Request(BASE + "/summon-litany",
+                  data=b'', headers={'Content-Type': 'application/x-www-form-urlencoded'})
               resp = urllib.request.urlopen(req, timeout=10)
               d = json.loads(resp.read())
               seq = d.get('playback_sequence', [])
               return ''.join(c for c in seq if c != ' ').upper()
 
-          cipher = open('/tmp/cipher.txt').read().strip()
+          # ── Oracle: map the full 26x26 cipher table for each key-char ────
+          print("=== Building cipher table ===")
+          # For key='a' (=0), test all 26 plaintexts
+          alpha = 'abcdefghijklmnopqrstuvwxyz'
+          
+          # Single char key tests
+          r_a = invoke(alpha, 'a')   # encrypt all letters with key='a'
+          r_b = invoke(alpha, 'b')   # encrypt all letters with key='b'  
+          r_c = invoke(alpha, 'c')   # encrypt all letters with key='c'
+          
+          print(f"invoke(alpha, 'a') = {r_a}")
+          print(f"invoke(alpha, 'b') = {r_b}")
+          print(f"invoke(alpha, 'c') = {r_c}")
+          
+          # Build decrypt tables: decrypt[key_char][cipher_char] = plain_char
+          # encrypt[k][p] = c  →  decrypt[k][c] = p
+          dec_table = {}
+          for ki, (k, row) in enumerate(zip('abc', [r_a, r_b, r_c])):
+              dec_table[ki] = {}
+              for pi, ci in enumerate(row):
+                  dec_table[ki][ci] = alpha[pi]
+          
+          print("\nDecrypt table sample (key_idx → cipher → plain):")
+          for ki in range(3):
+              sample = {c: dec_table[ki][c] for c in list(dec_table[ki])[:5]}
+              print(f"  key[{ki}]: {sample}")
 
-          # Vigenere encrypt(plaintext, key) should equal cipher
-          def vig_enc(p, k):
-              k = k.upper()
-              result = []
-              ki = 0
-              for ch in p:
-                  if ch.isalpha():
-                      c = (ord(ch.upper()) - ord('A') + ord(k[ki % len(k)]) - ord('A')) % 26
-                      result.append(chr(c + ord('A')))
-                      ki += 1
-              return ''.join(result)
+          # ── Get fresh cipher ───────────────────────────────────────────
+          cipher = litany()
+          print(f"\nFresh cipher: {cipher}")
 
-          def vig_dec(c, k):
-              k = k.upper()
-              result = []
-              ki = 0
-              for ch in c:
-                  if ch.isalpha():
-                      p = (ord(ch) - ord('A') - (ord(k[ki % len(k)]) - ord('A')) + 26) % 26
-                      result.append(chr(p + ord('a')))
-                      ki += 1
-              return ''.join(result)
-
-          # Verify: if we invoke(candidate_plaintext, key)
-          # the server output should match cipher
-          # (because server encrypt == /invoke when we use the same key)
-          # 
-          # But server uses its own secret key for /summon-litany
-          # We need to find candidate where invoke(candidate, key) == cipher
-          # by trying different keys
-
-          from itertools import product
-          import string
+          # ── Kasiski to find key length ─────────────────────────────────
           from math import gcd
           from functools import reduce
-
+          
           def kasiski(ct):
               distances = []
               for plen in range(2, 6):
@@ -241,38 +81,101 @@ jobs:
                           if ct[j:j+plen] == pat:
                               distances.append(j - i)
               return reduce(gcd, distances) if distances else 3
-
+          
           klen = kasiski(cipher)
+          print(f"Kasiski key length: {klen}")
+
+          # ── Build full decrypt table for all key positions ─────────────
+          # We need decrypt tables for key chars at each position mod klen
+          # First: find what key char maps at each position
+          # 
+          # Strategy: for each position i in cipher,
+          # key_char = key[i % klen]
+          # We need to find what key_char is by trying all 26 possibilities
+          #
+          # Use invoke to test: if we encrypt known plaintext with the SECRET key,
+          # we can identify the key.
+          #
+          # BUT invoke uses USER arcana, not secret arcana!
+          # 
+          # REAL APPROACH: build full lookup table for every possible key char
+          # For each key position, try all 26 possible key chars
+          # For each cipher char, find which key char produces a "likely" plaintext
+          
+          # Build complete decrypt table for all 26 key chars
+          print("\nBuilding complete decrypt table for all 26 key chars...")
+          full_dec = {}  # full_dec[key_char_idx][cipher_char] = plain_char
+          
+          # We already have key=a,b,c. Need all 26.
+          # Batch: test key=d through z
+          remaining_keys = 'defghijklmnopqrstuvwxyz'
+          results = {}
+          results['a'] = r_a
+          results['b'] = r_b
+          results['c'] = r_c
+          
+          for k in remaining_keys:
+              results[k] = invoke(alpha, k)
+          
+          # Build decrypt table
+          for k, row in results.items():
+              ki = ord(k) - ord('a')
+              full_dec[ki] = {}
+              for pi, ci in enumerate(row.upper()):
+                  full_dec[ki][ci] = alpha[pi]
+          
+          print("Complete decrypt table built!")
+          
+          # ── Brute force key ────────────────────────────────────────────
+          from itertools import product
+          
           freq = {'e':12.7,'t':9.1,'a':8.2,'o':7.5,'i':7.0,'n':6.7,'s':6.3,
                   'h':6.1,'r':6.0,'d':4.3,'l':4.0,'c':2.8,'u':2.8,'m':2.4,
                   'w':2.4,'f':2.2,'g':2.0,'y':2.0,'p':1.9,'b':1.5}
-
+          
+          def decrypt_with_key(cipher, key_indices):
+              result = []
+              for i, ch in enumerate(cipher):
+                  ki = key_indices[i % len(key_indices)]
+                  plain = full_dec[ki].get(ch, '?')
+                  result.append(plain)
+              return ''.join(result)
+          
+          def score(pt):
+              return sum(freq.get(c, 0.1) for c in pt)
+          
           best = []
-          for combo in product(string.ascii_uppercase, repeat=klen):
-              k = ''.join(combo)
-              pt = vig_dec(cipher, k)
-              score = sum(freq.get(c, 0.1) for c in pt)
-              best.append((score, k, pt))
-
+          for combo in product(range(26), repeat=klen):
+              pt = decrypt_with_key(cipher, combo)
+              s = score(pt)
+              best.append((s, combo, pt))
+          
           best.sort(reverse=True)
-          top_key, top_pt = best[0][1], best[0][2]
-
-          # Verify via oracle: invoke(top_pt, top_key) should == cipher
-          print(f"Testing best candidate: key={top_key} pt={top_pt}")
-          oracle_out = invoke(top_pt, top_key.lower())
-          print(f"invoke(pt, key) = {oracle_out}")
-          print(f"cipher          = {cipher}")
-          match = oracle_out == cipher
-          print(f"MATCH: {match}")
-
-          if match:
-              print(f"\n🚩 CONFIRMED FLAG: CTF{{{top_pt}}}")
+          
+          print(f"\nTop 10 decryptions:")
+          for s, combo, pt in best[:10]:
+              key_str = ''.join(chr(k + ord('a')) for k in combo)
+              print(f"  key={key_str} score={s:.1f} → {pt}")
+          
+          top_pt = best[0][2]
+          top_key = ''.join(chr(k + ord('a')) for k in best[0][1])
+          
+          # ── Verify via invoke oracle ───────────────────────────────────
+          print(f"\nVerifying: invoke('{top_pt}', '{top_key}') should == '{cipher}'")
+          verification = invoke(top_pt, top_key)
+          print(f"Got: {verification}")
+          print(f"Match: {verification == cipher}")
+          
+          if verification == cipher:
+              print(f"\n🚩 FLAG: CTF{{{top_pt}}}")
           else:
-              print("\nNo match on top candidate, trying top 10...")
-              for score, k, pt in best[1:10]:
-                  out = invoke(pt, k.lower())
-                  print(f"  key={k} out={out} cipher={cipher} match={out==cipher}")
-                  if out == cipher:
-                      print(f"\n🚩 CONFIRMED FLAG: CTF{{{pt}}}")
+              # Try top 20
+              print("\nTrying top 20 candidates...")
+              for s, combo, pt in best[1:20]:
+                  key_str = ''.join(chr(k + ord('a')) for k in combo)
+                  v = invoke(pt, key_str)
+                  if v == cipher:
+                      print(f"🚩 FLAG: CTF{{{pt}}}")
                       break
+                  print(f"  key={key_str} → {pt} | match={v==cipher}")
           EOF
