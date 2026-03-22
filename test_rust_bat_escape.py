@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+import sys, io
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 """
 test_rust_bat_escape.py
 =======================
@@ -481,10 +487,10 @@ def print_report(env_info: dict, findings: dict, workdir: Path):
 # ===========================
 
 def main():
-    print("╔══════════════════════════════════════════╗")
-    print("║  Rust Batch Escaping Bypass Tester       ║")
-    print("║  Target: std::process::Command on Windows ║")
-    print("╚══════════════════════════════════════════╝")
+    print("[=== Rust Batch Escaping Bypass Tester ===]")
+    print("[  Target: std::process::Command on Windows  ]")
+    print("")
+    print("[============================================]")
     print()
 
     # مجلد العمل
