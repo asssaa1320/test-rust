@@ -1,152 +1,249 @@
-name: Solve GhostCrypt - Test Empty Arcana + All Key Lengths
+name: Solve Kitty Terminal Challenge
 
 on:
   workflow_dispatch:
 
 jobs:
-  crack:
+  solve:
     runs-on: ubuntu-latest
     steps:
-      - name: Test empty arcana and extended brute force
+
+      - name: Install tools
+        run: |
+          sudo apt-get install -y socat netcat-openbsd 2>/dev/null || true
+
+      - name: Try TERM=xterm-kitty via env
+        run: |
+          # الـ challenge بيشوف TERM variable
+          # نبعت commands مع TERM=xterm-kitty
+          
+          python3 - <<'EOF'
+          import socket, time, os
+
+          host = "kitty-7c6c7969.challenges.bsidessf.net"
+          port = 8024
+
+          def send_recv(s, cmd, wait=1.5):
+              s.sendall(cmd)
+              time.sleep(wait)
+              data = b''
+              s.settimeout(2)
+              try:
+                  while True:
+                      chunk = s.recv(4096)
+                      if not chunk: break
+                      data += chunk
+              except:
+                  pass
+              return data
+
+          s = socket.create_connection((host, port), timeout=15)
+          s.settimeout(5)
+          
+          # Read initial prompt
+          time.sleep(2)
+          init = b''
+          try:
+              init = s.recv(4096)
+          except: pass
+          print("=== Initial ===")
+          print(repr(init))
+          print(init.decode('utf-8', errors='replace'))
+
+          # Try: export TERM=xterm-kitty then cat the flag
+          commands = [
+              b'export TERM=xterm-kitty\n',
+              b'export TERM_PROGRAM=kitty\n',
+              b'cat /home/ctf/flag.kitty\n',
+          ]
+
+          for cmd in commands:
+              out = send_recv(s, cmd)
+              print(f"\n=== After: {cmd.decode().strip()} ===")
+              print(repr(out))
+              print(out.decode('utf-8', errors='replace'))
+
+          s.close()
+          EOF
+
+      - name: Try Kitty terminal escape sequences
         run: |
           python3 - <<'EOF'
-          import urllib.request, json, urllib.parse
-          from itertools import product as iproduct
-          from math import gcd
-          from functools import reduce
+          import socket, time
 
-          BASE  = "https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
-          alpha = 'abcdefghijklmnopqrstuvwxyz'
+          host = "kitty-7c6c7969.challenges.bsidessf.net"
+          port = 8024
 
-          def invoke(inc, arc):
-              data = urllib.parse.urlencode({'incantation':inc,'arcana':arc}).encode()
-              req  = urllib.request.Request(BASE+"/invoke", data=data,
-                        headers={'Content-Type':'application/x-www-form-urlencoded'})
-              d = json.loads(urllib.request.urlopen(req, timeout=10).read())
-              return ''.join(c for c in d.get('playback_sequence',[]) if c!=' ').upper()
+          def send_recv(s, data, wait=2.0):
+              s.sendall(data)
+              time.sleep(wait)
+              out = b''
+              s.settimeout(2)
+              try:
+                  while True:
+                      chunk = s.recv(4096)
+                      if not chunk: break
+                      out += chunk
+              except: pass
+              return out
 
-          def litany():
-              req = urllib.request.Request(BASE+"/summon-litany", data=b'',
-                        headers={'Content-Type':'application/x-www-form-urlencoded'})
-              d = json.loads(urllib.request.urlopen(req, timeout=10).read())
-              raw = d.get('playback_sequence',[])
-              full = ''.join(c for c in raw).upper()  # keep spaces
-              no_sp = ''.join(c for c in raw if c!=' ').upper()
-              print(f"  raw sequence: {raw}")
-              print(f"  with spaces:  {full}")
-              print(f"  no spaces:    {no_sp}")
-              return no_sp
+          s = socket.create_connection((host, port), timeout=15)
+          time.sleep(2)
+          try: s.recv(4096)
+          except: pass
 
-          # ── Test 1: empty arcana ───────────────────────────────────────
-          print("=== Test: invoke(alpha, '') ===")
+          # Kitty identification via APC sequence
+          # Kitty uses: ESC_Ga=q,... ESC\ for graphics protocol
+          # Or DA1: ESC[c → kitty responds with: ESC[?62;c or similar
+          # Or: XTGETTCAP for kitty-specific capabilities
+          
+          tests = [
+              # Kitty keyboard protocol query
+              (b'\x1b[?u', "Kitty keyboard query"),
+              # Primary DA
+              (b'\x1b[0c', "Primary DA"),
+              # Secondary DA  
+              (b'\x1b[>0c', "Secondary DA"),
+              # Kitty graphics protocol - query
+              (b'\x1b_Gi=1,a=q;\x1b\\', "Kitty graphics query"),
+              # XTGETTCAP for kitty
+              (b'\x1bP+q6B756E697432 \x1b\\', "XTGETTCAP"),
+          ]
+
+          for seq, name in tests:
+              out = send_recv(s, seq, wait=1)
+              print(f"\n=== {name} ===")
+              print(repr(out))
+
+          s.close()
+          EOF
+
+      - name: Read flag with TERM=xterm-kitty set before connection
+        run: |
+          # The server likely checks TERM env var of the shell
+          # We need to set it BEFORE the shell starts
+          # Use stty or pass env via the protocol
+          
+          python3 - <<'EOF'
+          import socket, time
+
+          host = "kitty-7c6c7969.challenges.bsidessf.net"
+          port = 8024
+
+          def send_recv(s, cmd, wait=2.0):
+              if isinstance(cmd, str):
+                  cmd = cmd.encode()
+              s.sendall(cmd)
+              time.sleep(wait)
+              out = b''
+              s.settimeout(2)
+              try:
+                  while True:
+                      chunk = s.recv(4096)
+                      if not chunk: break
+                      out += chunk
+              except: pass
+              return out
+
+          s = socket.create_connection((host, port), timeout=15)
+          time.sleep(2)
           try:
-              r = invoke(alpha, '')
-              print(f"  result: {r}")
-          except Exception as e:
-              print(f"  error: {e}")
+              banner = s.recv(4096)
+              print("Banner:", banner.decode('utf-8', errors='replace'))
+          except: pass
 
-          # ── Test 2: arcana = 9 identical chars ────────────────────────
-          print("\n=== Test: invoke('a', 'aaaaaaaaa') (9 chars) ===")
-          r9 = invoke('a', 'aaaaaaaaa')
-          print(f"  result: {r9}  (expected A if identity)")
+          # Try various ways to set TERM
+          attempts = [
+              # Direct cat with TERM set
+              'TERM=xterm-kitty cat /home/ctf/flag.kitty\n',
+              # env command
+              'env TERM=xterm-kitty cat /home/ctf/flag.kitty\n',
+              # Check what file does
+              'file /home/ctf/flag.kitty\n',
+              # ls to see what's there
+              'ls -la /home/ctf/\n',
+              # Check if it's a script that checks TERM
+              'cat /home/ctf/flag.kitty\n',
+              # Check TERM variable
+              'echo TERM=$TERM\n',
+              # Check if there are other files
+              'ls -la /home/ctf/flag*\n',
+              # Try reading directly
+              'xxd /home/ctf/flag.kitty | head -20\n',
+              # Check file type
+              'file /home/ctf/flag.kitty\n',
+          ]
 
-          print("\n=== Test: invoke('a', 'bbbbbbbbb') (9 b's) ===")
-          r9b = invoke('a', 'bbbbbbbbb')
-          print(f"  result: {r9b}")
+          for cmd in attempts:
+              out = send_recv(s, cmd)
+              print(f"\n$ {cmd.strip()}")
+              print(out.decode('utf-8', errors='replace'))
 
-          # ── Test 3: get fresh litany and test literal ──────────────────
-          print("\n=== Fresh litany ===")
-          cipher = litany()
-          print(f"  cipher: {cipher}")
+          s.close()
+          EOF
 
-          # ── Test 4: build tables and brute force all key lengths 1..9 ─
-          print("\n=== Building E/D tables ===")
-          E = {}
-          D = {}
-          for k in alpha:
-              row = invoke(alpha, k).lower()
-              E[k] = dict(zip(alpha, row))
-              D[k] = {c:p for p,c in E[k].items()}
-          print("  done")
+      - name: Send Kitty terminal ID in TERMINFO
+        run: |
+          # Maybe the challenge uses terminfo or checks terminal capabilities
+          # Kitty has unique terminfo: xterm-kitty
+          # Let's try sending the Kitty terminal response to queries
+          
+          python3 - <<'EOF'
+          import socket, time
 
-          freq = {'e':12.7,'t':9.1,'a':8.2,'o':7.5,'i':7.0,'n':6.7,'s':6.3,
-                  'h':6.1,'r':6.0,'d':4.3,'l':4.0,'c':2.8,'u':2.8,'m':2.4,
-                  'w':2.4,'f':2.2,'g':2.0,'y':2.0,'p':1.9,'b':1.5}
+          host = "kitty-7c6c7969.challenges.bsidessf.net"
+          port = 8024
 
-          def decrypt_with_key(cipher, key):
-              pt = []
-              for i,ch in enumerate(cipher):
-                  k = key[i % len(key)]
-                  p = D[k].get(ch.lower())
-                  pt.append(p if p else '?')
-              return ''.join(pt)
+          s = socket.create_connection((host, port), timeout=15)
+          time.sleep(2)
+          try: s.recv(4096)
+          except: pass
 
-          def score(pt):
-              return sum(freq.get(c,0.1) for c in pt)
+          def send_recv(s, data, wait=2.0):
+              if isinstance(data, str): data = data.encode()
+              s.sendall(data)
+              time.sleep(wait)
+              out = b''
+              s.settimeout(2)
+              try:
+                  while True:
+                      chunk = s.recv(4096)
+                      if not chunk: break
+                      out += chunk
+              except: pass
+              return out
 
-          # Kasiski
-          def kasiski(ct):
-              dists=[]
-              for plen in range(2,6):
-                  for i in range(len(ct)-plen):
-                      pat=ct[i:i+plen]
-                      for j in range(i+plen,len(ct)-plen+1):
-                          if ct[j:j+plen]==pat: dists.append(j-i)
-              return reduce(gcd,dists) if dists else 0
+          # Kitty terminal responds to DA2 (Secondary Device Attributes) with:
+          # ESC[>1;4000;29c  (kitty version)
+          # So: server sends ESC[>c, we respond with kitty's response
 
-          k_gcd = kasiski(cipher)
-          print(f"\n  Kasiski GCD: {k_gcd}")
-          print(f"  Possible key lengths: {[k_gcd*i for i in range(1,6) if k_gcd]}")
+          # But actually: the SERVER checks OUR terminal type
+          # via TERM variable or by querying us
+          # 
+          # Sequence: server sends ESC[>c query → we respond as kitty
+          # ESC [ > 1 ; <version> ; 29 c
 
-          # Try key lengths 1,2,3,4,5,6,9,10
-          all_best = []
-          for klen in [1,2,3,4,5,6,9,10]:
-              candidates = []
-              if klen > 5:
-                  # Too many combinations - use per-position IC attack
-                  # For each position mod klen, find best single key char
-                  best_key = []
-                  for pos in range(klen):
-                      subcipher = [cipher[i] for i in range(pos, len(cipher), klen)]
-                      best_s, best_k = -1, 'a'
-                      for k in alpha:
-                          pt_sub = [D[k].get(c.lower(),'?') for c in subcipher]
-                          s = sum(freq.get(c,0.1) for c in pt_sub if c != '?')
-                          if s > best_s:
-                              best_s,best_k = s,k
-                      best_key.append(best_k)
-                  key = ''.join(best_key)
-                  pt = decrypt_with_key(cipher, key)
-                  candidates = [(score(pt), key, pt)]
-              else:
-                  for combo in iproduct(alpha, repeat=klen):
-                      key = ''.join(combo)
-                      pt  = decrypt_with_key(cipher, key)
-                      if '?' not in pt:
-                          candidates.append((score(pt), key, pt))
-                  candidates.sort(reverse=True)
+          # First read what server sends us
+          time.sleep(1)
+          try:
+              data = s.recv(4096)
+              print("Server sent:", repr(data))
+          except: pass
 
-              if candidates:
-                  best_s, best_k, best_pt = candidates[0]
-                  all_best.append((best_s, best_k, best_pt))
-                  print(f"\n  klen={klen}: key={best_k} score={best_s:.1f} → {best_pt}")
+          # Respond as Kitty terminal to DA2 query
+          # Kitty DA2 response: ESC [ > 1 ; 4000 ; 29 c
+          kitty_da2 = b'\x1b[>1;4000;29c'
+          
+          # Also try: set TERM via inline env
+          cmds = [
+              b'TERM=xterm-kitty bash -c "cat /home/ctf/flag.kitty"\n',
+              b'TERM=xterm-kitty sh -c "cat /home/ctf/flag.kitty"\n',
+          ]
+          
+          for cmd in cmds:
+              out = send_recv(s, cmd)
+              print(f"\nCmd: {cmd.decode().strip()}")
+              print(out.decode('utf-8', errors='replace'))
 
-          all_best.sort(reverse=True)
-          print(f"\n=== OVERALL BEST ===")
-          for s,k,pt in all_best[:5]:
-              print(f"  key={k} → {pt}  [CTF{{{pt}}}]")
-
-          # Per-char oracle verification for top 5
-          print("\n=== Per-char oracle verification ===")
-          for s,key,pt in all_best[:5]:
-              ok = True
-              for i,(pi,ci) in enumerate(zip(pt, cipher)):
-                  k_c = key[i % len(key)]
-                  out = invoke(pi, k_c).upper()
-                  if out != ci.upper():
-                      ok = False
-                      break
-              print(f"  key={key} → {pt} | match={ok}")
-              if ok:
-                  print(f"\n  🚩 FLAG: CTF{{{pt}}}")
+          s.close()
           EOF
