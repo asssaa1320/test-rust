@@ -1,5 +1,4 @@
 name: Solve GhostCrypt - Oracle Attack
-
 on:
   workflow_dispatch:
 
