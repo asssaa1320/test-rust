@@ -1,4 +1,4 @@
-name: Solve GhostCrypt - Final
+name: Solve GhostCrypt - Per-Char Verification
 
 on:
   workflow_dispatch:
@@ -7,134 +7,85 @@ jobs:
   crack:
     runs-on: ubuntu-latest
     steps:
-      - name: Targeted oracle + crack
+      - name: Verify per-char + find flag
         run: |
           python3 - <<'EOF'
           import urllib.request, json, urllib.parse
 
-          BASE = "https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
+          BASE  = "https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
           alpha = 'abcdefghijklmnopqrstuvwxyz'
 
           def invoke(inc, arc):
               data = urllib.parse.urlencode({'incantation':inc,'arcana':arc}).encode()
-              req = urllib.request.Request(BASE+"/invoke", data=data,
-                  headers={'Content-Type':'application/x-www-form-urlencoded'})
-              d = json.loads(urllib.request.urlopen(req,timeout=10).read())
+              req  = urllib.request.Request(BASE+"/invoke", data=data,
+                        headers={'Content-Type':'application/x-www-form-urlencoded'})
+              d = json.loads(urllib.request.urlopen(req, timeout=10).read())
               return ''.join(c for c in d.get('playback_sequence',[]) if c!=' ').upper()
 
           def litany():
               req = urllib.request.Request(BASE+"/summon-litany", data=b'',
-                  headers={'Content-Type':'application/x-www-form-urlencoded'})
-              d = json.loads(urllib.request.urlopen(req,timeout=10).read())
+                        headers={'Content-Type':'application/x-www-form-urlencoded'})
+              d = json.loads(urllib.request.urlopen(req, timeout=10).read())
               return ''.join(c for c in d.get('playback_sequence',[]) if c!=' ').upper()
 
-          # ── Step 1: build full encryption table E[key_char][plain] = cipher ─
-          # We already know key='a' is identity. Build all 26.
-          print("Building encryption table...")
-          E = {}  # E[k][p] = c  (all uppercase)
-          
-          # Test single chars one by one to avoid rate limits
+          # ── Build full E table: E[k][p] = c (single-char key) ─────────
+          print("Building E table for all 26 key chars...")
+          E = {}
           for k in alpha:
-              result = invoke(alpha, k)
-              E[k] = {}
-              for p, c in zip(alpha, result):
-                  E[k][p] = c
-          
-          # Build inverse: D[k][c] = p
+              row = invoke(alpha, k)
+              E[k] = dict(zip(alpha, row.lower().replace('j','j')))
+
+          # Build D (decrypt): D[k][c] = p
           D = {}
           for k in alpha:
               D[k] = {c:p for p,c in E[k].items()}
-          
-          print("Table built.")
 
-          # ── Step 2: targeted oracle calls to understand multi-char key ────
-          # Single char incantation with multi-char key
-          tests = {
-              'a': ['a','b','c','ab','abc','ba','bca','cab'],
-          }
-          print("\nSingle-char incantation 'a' with various keys:")
-          for key in ['a','b','c','d','e','f','ab','ac','ba','abc','bcd','aaa','bbb']:
-              r = invoke('a', key)
-              print(f"  invoke('a','{key}') = {r}")
-
-          # ── Step 3: get fresh cipher ──────────────────────────────────────
+          # ── Get fresh cipher ───────────────────────────────────────────
           cipher = litany()
-          print(f"\nFresh cipher: {cipher}")
+          print(f"Cipher: {cipher}")
 
-          # ── Step 4: try to identify key by using cipher as incantation ───
-          # If we find key X such that invoke(cipher.lower(), X) == cipher
-          # that means encrypt(cipher, X) == cipher → X is identity for cipher
-          # Not useful.
-          #
-          # Instead: find key X such that invoke(some_plaintext, X) == cipher
-          # Try systematic oracle:
-          # For each position i, if we know plain[i], we can find key[i%klen]
-          # using the single-char encryption table E[k][plain[i]] == cipher[i]
-          
-          # Kasiski on fresh cipher
-          from math import gcd; from functools import reduce
-          def kasiski(ct):
-              dists=[]
-              for plen in range(2,5):
-                  for i in range(len(ct)-plen):
-                      pat=ct[i:i+plen]
-                      for j in range(i+plen,len(ct)-plen+1):
-                          if ct[j:j+plen]==pat: dists.append(j-i)
-              return reduce(gcd,dists) if dists else 3
-          
-          klen = kasiski(cipher)
-          print(f"Kasiski key length: {klen}")
-
-          # ── Step 5: use invoke oracle to verify decryption attempt ────────
-          # For each candidate key, verify by encrypting the candidate plaintext
-          # and checking if it matches the cipher
-          
-          # Frequency-based attack using E table
+          # ── Brute force all 3-char keys using per-char D table ────────
+          from itertools import product as iproduct
           freq = {'e':12.7,'t':9.1,'a':8.2,'o':7.5,'i':7.0,'n':6.7,'s':6.3,
                   'h':6.1,'r':6.0,'d':4.3,'l':4.0,'c':2.8,'u':2.8,'m':2.4,
                   'w':2.4,'f':2.2,'g':2.0,'y':2.0,'p':1.9,'b':1.5}
-          
-          from itertools import product as iproduct
-          
-          # For single-char key (each pos independently):
-          # D[k][cipher[i]] = plain[i], maximize freq score
-          
-          # Try key lengths 1..5
-          best_overall = []
-          for kl in range(1, 6):
-              best = []
-              for combo in iproduct(alpha, repeat=kl):
+
+          best = []
+          for klen in [3]:   # Kasiski = 3
+              for combo in iproduct(alpha, repeat=klen):
                   key = ''.join(combo)
                   pt_chars = []
-                  valid = True
                   for i, ch in enumerate(cipher):
-                      k = key[i % kl]
-                      p = D[k].get(ch)
-                      if p is None: valid=False; break
-                      pt_chars.append(p)
-                  if not valid: continue
+                      k = key[i % klen]
+                      p = D[k].get(ch.upper(), D[k].get(ch))
+                      if p is None:
+                          # try lowercase lookup
+                          p = D[k].get(ch.lower().upper())
+                      pt_chars.append(p or '?')
                   pt = ''.join(pt_chars)
-                  s = sum(freq.get(c,0.1) for c in pt)
+                  s  = sum(freq.get(c,0.1) for c in pt)
                   best.append((s, key, pt))
-              best.sort(reverse=True)
-              if best:
-                  best_overall.extend(best[:3])
-                  print(f"\nklen={kl} top3:")
-                  for s,k,pt in best[:3]:
-                      print(f"  key={k} score={s:.1f} → {pt}")
-          
-          best_overall.sort(reverse=True)
-          print(f"\nTop 10 across all key lengths:")
-          for s,k,pt in best_overall[:10]:
-              print(f"  key={k} score={s:.1f} → {pt} → CTF{{{pt}}}")
-          
-          # Verify top candidates via oracle
-          print("\nVerifying top candidates...")
-          for s, key, pt in best_overall[:5]:
-              v = invoke(pt, key)
-              match = (v == cipher)
-              print(f"  key={key} pt={pt} → invoke={v} match={match}")
+
+          best.sort(reverse=True)
+          print("\nTop 10 candidates:")
+          for s, k, pt in best[:10]:
+              print(f"  key={k}  score={s:.1f}  →  {pt}")
+
+          # ── Verify per-char: invoke each plain with its key char ──────
+          # For key K and plaintext P:
+          # cipher[i] should == invoke(P[i], K[i%klen]).upper()
+          print("\nVerifying top candidates (per-char)...")
+          for s, key, pt in best[:20]:
+              klen  = len(key)
+              match = True
+              for i, (pi, ci) in enumerate(zip(pt, cipher)):
+                  k    = key[i % klen]
+                  out  = invoke(pi, k)     # single char invocation
+                  if out.upper() != ci.upper():
+                      match = False
+                      break
+              print(f"  key={key}  pt={pt}  match={match}")
               if match:
-                  print(f"\n  🚩 CONFIRMED FLAG: CTF{{{pt}}}")
+                  print(f"\n  🚩 FLAG: CTF{{{pt}}}")
                   break
           EOF
