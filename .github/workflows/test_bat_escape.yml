@@ -7,7 +7,6 @@ on:
 jobs:
   verify-bugs:
     runs-on: ubuntu-latest
-
     steps:
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -22,104 +21,32 @@ jobs:
           go get github.com/hiero-ledger/hiero-sdk-go/v2@latest
           go mod tidy
 
-      - name: Bug 2 - ClientFromConfigWithoutScheduleNetworkUpdate NPE
+      - name: Bug 2 - NPE in ClientFromConfigWithoutScheduleNetworkUpdate
         run: |
           mkdir -p ~/hiero-test/bug2
-          cat > ~/hiero-test/bug2/main_test.go << 'EOF'
-package bug2_test
-
-import (
-	"testing"
-
-	hiero "github.com/hiero-ledger/hiero-sdk-go/v2/sdk"
-)
-
-func TestBug2_NilPointerPanic(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Logf("BUG CONFIRMED — panic: %v", r)
-		} else {
-			t.Log("No panic — possibly fixed")
-		}
-	}()
-	badJSON := []byte(`{"network":"mainnet","mirrorNetwork":123}`)
-	client, err := hiero.ClientFromConfigWithoutScheduleNetworkUpdate(badJSON)
-	t.Logf("client=%v err=%v", client, err)
-}
-EOF
-          cd ~/hiero-test && go mod tidy && go test ./bug2/ -v -run TestBug2
+          echo "cGFja2FnZSBidWcyX3Rlc3QKCmltcG9ydCAoCgkidGVzdGluZyIKCWhpZXJvICJnaXRodWIuY29tL2hpZXJvLWxlZGdlci9oaWVyby1zZGstZ28vdjIvc2RrIgopCgpmdW5jIFRlc3RCdWcyX05pbFBvaW50ZXJQYW5pYyh0ICp0ZXN0aW5nLlQpIHsKCWRlZmVyIGZ1bmMoKSB7CgkJaWYgciA6PSByZWNvdmVyKCk7IHIgIT0gbmlsIHsKCQkJdC5Mb2dmKCJCVUcgQ09ORklSTUVEIOKAlCBwYW5pYzogJXYiLCByKQoJCX0gZWxzZSB7CgkJCXQuTG9nKCJObyBwYW5pYyDigJQgcG9zc2libHkgZml4ZWQiKQoJCX0KCX0oKQoJYmFkSlNPTiA6PSBbXWJ5dGUoYHsibmV0d29yayI6Im1haW5uZXQiLCJtaXJyb3JOZXR3b3JrIjoxMjN9YCkKCWNsaWVudCwgZXJyIDo9IGhpZXJvLkNsaWVudEZyb21Db25maWdXaXRob3V0U2NoZWR1bGVOZXR3b3JrVXBkYXRlKGJhZEpTT04pCgl0LkxvZ2YoImNsaWVudD0ldiBlcnI9JXYiLCBjbGllbnQsIGVycikKfQo=" | base64 -d > ~/hiero-test/bug2/main_test.go
+          cd ~/hiero-test && go mod tidy
+          go test ./bug2/ -v -run TestBug2
 
       - name: Bug 1 - SetNetworkUpdatePeriod(0) goroutine spike
         run: |
           mkdir -p ~/hiero-test/bug1
-          cat > ~/hiero-test/bug1/main_test.go << 'EOF'
-package bug1_test
-
-import (
-	"runtime"
-	"testing"
-	"time"
-
-	hiero "github.com/hiero-ledger/hiero-sdk-go/v2/sdk"
-)
-
-func TestBug1_ZeroPeriodLoop(t *testing.T) {
-	client := hiero.ClientForTestnet()
-	defer client.Close()
-
-	before := runtime.NumGoroutine()
-	client.SetNetworkUpdatePeriod(0)
-	time.Sleep(500 * time.Millisecond)
-	after := runtime.NumGoroutine()
-
-	t.Logf("Goroutines before: %d", before)
-	t.Logf("Goroutines after:  %d", after)
-	t.Logf("Delta: +%d", after-before)
-
-	if after > before+5 {
-		t.Logf("BUG CONFIRMED — goroutine spike detected: +%d", after-before)
-	} else {
-		t.Log("No goroutine spike — check CPU usage manually")
-	}
-}
-EOF
-          cd ~/hiero-test && go mod tidy && timeout 10 go test ./bug1/ -v -run TestBug1 -timeout 8s || echo "TIMEOUT — likely infinite loop confirmed"
+          echo "cGFja2FnZSBidWcxX3Rlc3QKCmltcG9ydCAoCgkicnVudGltZSIKCSJ0ZXN0aW5nIgoJInRpbWUiCgloaWVybyAiZ2l0aHViLmNvbS9oaWVyby1sZWRnZXIvaGllcm8tc2RrLWdvL3YyL3NkayIKKQoKZnVuYyBUZXN0QnVnMV9aZXJvUGVyaW9kTG9vcCh0ICp0ZXN0aW5nLlQpIHsKCWNsaWVudCA6PSBoaWVyby5DbGllbnRGb3JUZXN0bmV0KCkKCWRlZmVyIGNsaWVudC5DbG9zZSgpCgliZWZvcmUgOj0gcnVudGltZS5OdW1Hb3JvdXRpbmUoKQoJY2xpZW50LlNldE5ldHdvcmtVcGRhdGVQZXJpb2QoMCkKCXRpbWUuU2xlZXAoNTAwICogdGltZS5NaWxsaXNlY29uZCkKCWFmdGVyIDo9IHJ1bnRpbWUuTnVtR29yb3V0aW5lKCkKCXQuTG9nZigiR29yb3V0aW5lcyBiZWZvcmU6ICVkIiwgYmVmb3JlKQoJdC5Mb2dmKCJHb3JvdXRpbmVzIGFmdGVyOiAgJWQiLCBhZnRlcikKCXQuTG9nZigiRGVsdGE6ICslZCIsIGFmdGVyLWJlZm9yZSkKCWlmIGFmdGVyID4gYmVmb3JlKzUgewoJCXQuTG9nZigiQlVHIENPTkZJUk1FRCDigJQgZ29yb3V0aW5lIHNwaWtlOiArJWQiLCBhZnRlci1iZWZvcmUpCgl9IGVsc2UgewoJCXQuTG9nKCJObyBzcGlrZSBkZXRlY3RlZCIpCgl9Cn0K" | base64 -d > ~/hiero-test/bug1/main_test.go
+          cd ~/hiero-test && go mod tidy
+          timeout 10 go test ./bug1/ -v -run TestBug1 -timeout 8s || echo "TIMEOUT — infinite loop likely"
 
       - name: Bug 3 - defer UpdateAddressBook inside retry loop
         run: |
           mkdir -p ~/hiero-test/bug3
-          cat > ~/hiero-test/bug3/main_test.go << 'EOF'
-package bug3_test
-
-import (
-	"testing"
-
-	hiero "github.com/hiero-ledger/hiero-sdk-go/v2/sdk"
-)
-
-func TestBug3_DeferInLoop(t *testing.T) {
-	client := hiero.ClientForTestnet()
-	defer client.Close()
-
-	_, err := hiero.NewAccountBalanceQuery().
-		SetAccountID(hiero.AccountID{Account: 999999999}).
-		SetNodeAccountIDs([]hiero.AccountID{{Account: 99}}).
-		SetMaxRetry(3).
-		Execute(client)
-
-	t.Logf("Result err: %v", err)
-	t.Log("Manual check: count UpdateAddressBook calls during _Execute — expected 3 deferred calls at end")
-}
-EOF
-          cd ~/hiero-test && go mod tidy && go test ./bug3/ -v -run TestBug3 -timeout 30s
+          echo "cGFja2FnZSBidWczX3Rlc3QKCmltcG9ydCAoCgkidGVzdGluZyIKCWhpZXJvICJnaXRodWIuY29tL2hpZXJvLWxlZGdlci9oaWVyby1zZGstZ28vdjIvc2RrIgopCgpmdW5jIFRlc3RCdWczX0RlZmVySW5Mb29wKHQgKnRlc3RpbmcuVCkgewoJY2xpZW50IDo9IGhpZXJvLkNsaWVudEZvclRlc3RuZXQoKQoJZGVmZXIgY2xpZW50LkNsb3NlKCkKCV8sIGVyciA6PSBoaWVyby5OZXdBY2NvdW50QmFsYW5jZVF1ZXJ5KCkuCgkJU2V0QWNjb3VudElEKGhpZXJvLkFjY291bnRJRHtBY2NvdW50OiA5OTk5OTk5OTl9KS4KCQlTZXROb2RlQWNjb3VudElEcyhbXWhpZXJvLkFjY291bnRJRHt7QWNjb3VudDogOTl9fSkuCgkJU2V0TWF4UmV0cnkoMykuCgkJRXhlY3V0ZShjbGllbnQpCgl0LkxvZ2YoImVycjogJXYiLCBlcnIpCgl0LkxvZygiQ2hlY2sgbG9nczogZXhwZWN0IDN4IFVwZGF0ZUFkZHJlc3NCb29rIGRlZmVycmVkIGNhbGxzIikKfQo=" | base64 -d > ~/hiero-test/bug3/main_test.go
+          cd ~/hiero-test && go mod tidy
+          go test ./bug3/ -v -run TestBug3 -timeout 30s
 
       - name: Summary
         if: always()
         run: |
           echo "========================================"
-          echo "Security Bug Verification Summary"
-          echo "========================================"
-          echo "Bug 1: SetNetworkUpdatePeriod(0) → goroutine infinite loop"
-          echo "Bug 2: ClientFromConfigWithoutScheduleNetworkUpdate → nil pointer panic"
-          echo "Bug 3: defer _UpdateAddressBook() inside retry loop → N deferred calls"
+          echo "Bug 1: SetNetworkUpdatePeriod(0) infinite goroutine loop"
+          echo "Bug 2: ClientFromConfigWithoutScheduleNetworkUpdate nil pointer panic"
+          echo "Bug 3: defer UpdateAddressBook inside retry loop - N deferred calls"
           echo "========================================"
