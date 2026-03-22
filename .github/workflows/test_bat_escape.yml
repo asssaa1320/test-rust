@@ -1,4 +1,4 @@
-name: Solve GhostCrypt - Fixed Lookup
+name: Solve GhostCrypt - Test Empty Arcana + All Key Lengths
 
 on:
   workflow_dispatch:
@@ -7,17 +7,16 @@ jobs:
   crack:
     runs-on: ubuntu-latest
     steps:
-      - name: Crack with fixed case-sensitive lookup
+      - name: Test empty arcana and extended brute force
         run: |
           python3 - <<'EOF'
           import urllib.request, json, urllib.parse
           from itertools import product as iproduct
+          from math import gcd
+          from functools import reduce
 
           BASE  = "https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
           alpha = 'abcdefghijklmnopqrstuvwxyz'
-          freq  = {'e':12.7,'t':9.1,'a':8.2,'o':7.5,'i':7.0,'n':6.7,'s':6.3,
-                   'h':6.1,'r':6.0,'d':4.3,'l':4.0,'c':2.8,'u':2.8,'m':2.4,
-                   'w':2.4,'f':2.2,'g':2.0,'y':2.0,'p':1.9,'b':1.5}
 
           def invoke(inc, arc):
               data = urllib.parse.urlencode({'incantation':inc,'arcana':arc}).encode()
@@ -30,43 +29,124 @@ jobs:
               req = urllib.request.Request(BASE+"/summon-litany", data=b'',
                         headers={'Content-Type':'application/x-www-form-urlencoded'})
               d = json.loads(urllib.request.urlopen(req, timeout=10).read())
-              return ''.join(c for c in d.get('playback_sequence',[]) if c!=' ').upper()
+              raw = d.get('playback_sequence',[])
+              full = ''.join(c for c in raw).upper()  # keep spaces
+              no_sp = ''.join(c for c in raw if c!=' ').upper()
+              print(f"  raw sequence: {raw}")
+              print(f"  with spaces:  {full}")
+              print(f"  no spaces:    {no_sp}")
+              return no_sp
 
-          # Build E and D tables (all lowercase internally)
-          print("Building cipher tables...")
-          E = {}   # E[key_char][plain_lower] = cipher_lower
-          D = {}   # D[key_char][cipher_lower] = plain_lower
+          # ── Test 1: empty arcana ───────────────────────────────────────
+          print("=== Test: invoke(alpha, '') ===")
+          try:
+              r = invoke(alpha, '')
+              print(f"  result: {r}")
+          except Exception as e:
+              print(f"  error: {e}")
+
+          # ── Test 2: arcana = 9 identical chars ────────────────────────
+          print("\n=== Test: invoke('a', 'aaaaaaaaa') (9 chars) ===")
+          r9 = invoke('a', 'aaaaaaaaa')
+          print(f"  result: {r9}  (expected A if identity)")
+
+          print("\n=== Test: invoke('a', 'bbbbbbbbb') (9 b's) ===")
+          r9b = invoke('a', 'bbbbbbbbb')
+          print(f"  result: {r9b}")
+
+          # ── Test 3: get fresh litany and test literal ──────────────────
+          print("\n=== Fresh litany ===")
+          cipher = litany()
+          print(f"  cipher: {cipher}")
+
+          # ── Test 4: build tables and brute force all key lengths 1..9 ─
+          print("\n=== Building E/D tables ===")
+          E = {}
+          D = {}
           for k in alpha:
-              row = invoke(alpha, k).lower()   # 26 chars, lowercase output
+              row = invoke(alpha, k).lower()
               E[k] = dict(zip(alpha, row))
               D[k] = {c:p for p,c in E[k].items()}
+          print("  done")
 
-          cipher = litany()
-          print(f"Cipher: {cipher}")
+          freq = {'e':12.7,'t':9.1,'a':8.2,'o':7.5,'i':7.0,'n':6.7,'s':6.3,
+                  'h':6.1,'r':6.0,'d':4.3,'l':4.0,'c':2.8,'u':2.8,'m':2.4,
+                  'w':2.4,'f':2.2,'g':2.0,'y':2.0,'p':1.9,'b':1.5}
 
-          # Brute force key (length 3 per Kasiski)
-          best = []
-          for combo in iproduct(alpha, repeat=3):
-              key = ''.join(combo)
-              pt  = ''.join(D[key[i%3]].get(cipher[i].lower(), '?')
-                            for i in range(len(cipher)))
-              if '?' in pt:
-                  continue
-              s = sum(freq.get(c, 0.1) for c in pt)
-              best.append((s, key, pt))
+          def decrypt_with_key(cipher, key):
+              pt = []
+              for i,ch in enumerate(cipher):
+                  k = key[i % len(key)]
+                  p = D[k].get(ch.lower())
+                  pt.append(p if p else '?')
+              return ''.join(pt)
 
-          best.sort(reverse=True)
-          print("\nTop 20:")
-          for s, k, pt in best[:20]:
-              print(f"  key={k}  score={s:.1f}  →  {pt}")
+          def score(pt):
+              return sum(freq.get(c,0.1) for c in pt)
 
-          # Verify per-char via oracle
-          print("\nVerifying top candidates per-char...")
-          for s, key, pt in best[:30]:
-              ok = all(invoke(pt[i], key[i%3]).upper() == cipher[i].upper()
-                       for i in range(len(cipher)))
-              print(f"  key={key}  pt={pt}  match={ok}")
+          # Kasiski
+          def kasiski(ct):
+              dists=[]
+              for plen in range(2,6):
+                  for i in range(len(ct)-plen):
+                      pat=ct[i:i+plen]
+                      for j in range(i+plen,len(ct)-plen+1):
+                          if ct[j:j+plen]==pat: dists.append(j-i)
+              return reduce(gcd,dists) if dists else 0
+
+          k_gcd = kasiski(cipher)
+          print(f"\n  Kasiski GCD: {k_gcd}")
+          print(f"  Possible key lengths: {[k_gcd*i for i in range(1,6) if k_gcd]}")
+
+          # Try key lengths 1,2,3,4,5,6,9,10
+          all_best = []
+          for klen in [1,2,3,4,5,6,9,10]:
+              candidates = []
+              if klen > 5:
+                  # Too many combinations - use per-position IC attack
+                  # For each position mod klen, find best single key char
+                  best_key = []
+                  for pos in range(klen):
+                      subcipher = [cipher[i] for i in range(pos, len(cipher), klen)]
+                      best_s, best_k = -1, 'a'
+                      for k in alpha:
+                          pt_sub = [D[k].get(c.lower(),'?') for c in subcipher]
+                          s = sum(freq.get(c,0.1) for c in pt_sub if c != '?')
+                          if s > best_s:
+                              best_s,best_k = s,k
+                      best_key.append(best_k)
+                  key = ''.join(best_key)
+                  pt = decrypt_with_key(cipher, key)
+                  candidates = [(score(pt), key, pt)]
+              else:
+                  for combo in iproduct(alpha, repeat=klen):
+                      key = ''.join(combo)
+                      pt  = decrypt_with_key(cipher, key)
+                      if '?' not in pt:
+                          candidates.append((score(pt), key, pt))
+                  candidates.sort(reverse=True)
+
+              if candidates:
+                  best_s, best_k, best_pt = candidates[0]
+                  all_best.append((best_s, best_k, best_pt))
+                  print(f"\n  klen={klen}: key={best_k} score={best_s:.1f} → {best_pt}")
+
+          all_best.sort(reverse=True)
+          print(f"\n=== OVERALL BEST ===")
+          for s,k,pt in all_best[:5]:
+              print(f"  key={k} → {pt}  [CTF{{{pt}}}]")
+
+          # Per-char oracle verification for top 5
+          print("\n=== Per-char oracle verification ===")
+          for s,key,pt in all_best[:5]:
+              ok = True
+              for i,(pi,ci) in enumerate(zip(pt, cipher)):
+                  k_c = key[i % len(key)]
+                  out = invoke(pi, k_c).upper()
+                  if out != ci.upper():
+                      ok = False
+                      break
+              print(f"  key={key} → {pt} | match={ok}")
               if ok:
                   print(f"\n  🚩 FLAG: CTF{{{pt}}}")
-                  break
           EOF
