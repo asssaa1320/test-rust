@@ -1,52 +1,198 @@
-name: Security Bug Verification
+name: Solve GhostCrypt CTF
 
 on:
-  push:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 jobs:
-  verify-bugs:
+  solve:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Setup test module
+      - name: Probe challenge homepage
         run: |
-          mkdir -p ~/hiero-test
-          cd ~/hiero-test
-          go mod init hiero-security-test
-          go get github.com/hiero-ledger/hiero-sdk-go/v2@latest
-          go mod tidy
+          echo "=== Fetching homepage ==="
+          curl -s -L "https://ghostcrypt-2c7aa570.challenges.bsidessf.net/" \
+            -o homepage.html \
+            -w "HTTP %{http_code} | Size: %{size_download} bytes\n"
+          cat homepage.html
 
-      - name: Bug 2 - NPE in ClientFromConfigWithoutScheduleNetworkUpdate
+      - name: Extract JS/asset links
         run: |
-          mkdir -p ~/hiero-test/bug2
-          echo "cGFja2FnZSBidWcyX3Rlc3QKCmltcG9ydCAoCgkidGVzdGluZyIKCWhpZXJvICJnaXRodWIuY29tL2hpZXJvLWxlZGdlci9oaWVyby1zZGstZ28vdjIvc2RrIgopCgpmdW5jIFRlc3RCdWcyX05pbFBvaW50ZXJQYW5pYyh0ICp0ZXN0aW5nLlQpIHsKCWRlZmVyIGZ1bmMoKSB7CgkJaWYgciA6PSByZWNvdmVyKCk7IHIgIT0gbmlsIHsKCQkJdC5Mb2dmKCJCVUcgQ09ORklSTUVEIOKAlCBwYW5pYzogJXYiLCByKQoJCX0gZWxzZSB7CgkJCXQuTG9nKCJObyBwYW5pYyDigJQgcG9zc2libHkgZml4ZWQiKQoJCX0KCX0oKQoJYmFkSlNPTiA6PSBbXWJ5dGUoYHsibmV0d29yayI6Im1haW5uZXQiLCJtaXJyb3JOZXR3b3JrIjoxMjN9YCkKCWNsaWVudCwgZXJyIDo9IGhpZXJvLkNsaWVudEZyb21Db25maWdXaXRob3V0U2NoZWR1bGVOZXR3b3JrVXBkYXRlKGJhZEpTT04pCgl0LkxvZ2YoImNsaWVudD0ldiBlcnI9JXYiLCBjbGllbnQsIGVycikKfQo=" | base64 -d > ~/hiero-test/bug2/main_test.go
-          cd ~/hiero-test && go mod tidy
-          go test ./bug2/ -v -run TestBug2
+          echo "=== JS and asset links ==="
+          grep -oP '(src|href)="[^"]*"' homepage.html | sort -u || true
+          grep -oP '/[a-zA-Z0-9/_.-]+\.(js|mjs|ts|json|yaml|yml)' homepage.html | sort -u || true
 
-      - name: Bug 1 - SetNetworkUpdatePeriod(0) goroutine spike
+      - name: Fetch all discovered JS files
         run: |
-          mkdir -p ~/hiero-test/bug1
-          echo "cGFja2FnZSBidWcxX3Rlc3QKCmltcG9ydCAoCgkicnVudGltZSIKCSJ0ZXN0aW5nIgoJInRpbWUiCgloaWVybyAiZ2l0aHViLmNvbS9oaWVyby1sZWRnZXIvaGllcm8tc2RrLWdvL3YyL3NkayIKKQoKZnVuYyBUZXN0QnVnMV9aZXJvUGVyaW9kTG9vcCh0ICp0ZXN0aW5nLlQpIHsKCWNsaWVudCA6PSBoaWVyby5DbGllbnRGb3JUZXN0bmV0KCkKCWRlZmVyIGNsaWVudC5DbG9zZSgpCgliZWZvcmUgOj0gcnVudGltZS5OdW1Hb3JvdXRpbmUoKQoJY2xpZW50LlNldE5ldHdvcmtVcGRhdGVQZXJpb2QoMCkKCXRpbWUuU2xlZXAoNTAwICogdGltZS5NaWxsaXNlY29uZCkKCWFmdGVyIDo9IHJ1bnRpbWUuTnVtR29yb3V0aW5lKCkKCXQuTG9nZigiR29yb3V0aW5lcyBiZWZvcmU6ICVkIiwgYmVmb3JlKQoJdC5Mb2dmKCJHb3JvdXRpbmVzIGFmdGVyOiAgJWQiLCBhZnRlcikKCXQuTG9nZigiRGVsdGE6ICslZCIsIGFmdGVyLWJlZm9yZSkKCWlmIGFmdGVyID4gYmVmb3JlKzUgewoJCXQuTG9nZigiQlVHIENPTkZJUk1FRCDigJQgZ29yb3V0aW5lIHNwaWtlOiArJWQiLCBhZnRlci1iZWZvcmUpCgl9IGVsc2UgewoJCXQuTG9nKCJObyBzcGlrZSBkZXRlY3RlZCIpCgl9Cn0K" | base64 -d > ~/hiero-test/bug1/main_test.go
-          cd ~/hiero-test && go mod tidy
-          timeout 10 go test ./bug1/ -v -run TestBug1 -timeout 8s || echo "TIMEOUT — infinite loop likely"
+          BASE="https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
+          for path in $(grep -oP '(?<=(src|href)=")[^"]+' homepage.html | grep -E '\.(js|mjs)'); do
+            url="$BASE$path"
+            echo "=== Fetching: $url ==="
+            curl -s "$url" | head -300
+            echo ""
+          done
 
-      - name: Bug 3 - defer UpdateAddressBook inside retry loop
+      - name: Search for flag pattern in homepage
         run: |
-          mkdir -p ~/hiero-test/bug3
-          echo "cGFja2FnZSBidWczX3Rlc3QKCmltcG9ydCAoCgkidGVzdGluZyIKCWhpZXJvICJnaXRodWIuY29tL2hpZXJvLWxlZGdlci9oaWVyby1zZGstZ28vdjIvc2RrIgopCgpmdW5jIFRlc3RCdWczX0RlZmVySW5Mb29wKHQgKnRlc3RpbmcuVCkgewoJY2xpZW50IDo9IGhpZXJvLkNsaWVudEZvclRlc3RuZXQoKQoJZGVmZXIgY2xpZW50LkNsb3NlKCkKCV8sIGVyciA6PSBoaWVyby5OZXdBY2NvdW50QmFsYW5jZVF1ZXJ5KCkuCgkJU2V0QWNjb3VudElEKGhpZXJvLkFjY291bnRJRHtBY2NvdW50OiA5OTk5OTk5OTl9KS4KCQlTZXROb2RlQWNjb3VudElEcyhbXWhpZXJvLkFjY291bnRJRHt7QWNjb3VudDogOTl9fSkuCgkJU2V0TWF4UmV0cnkoMykuCgkJRXhlY3V0ZShjbGllbnQpCgl0LkxvZ2YoImVycjogJXYiLCBlcnIpCgl0LkxvZygiQ2hlY2sgbG9nczogZXhwZWN0IDN4IFVwZGF0ZUFkZHJlc3NCb29rIGRlZmVycmVkIGNhbGxzIikKfQo=" | base64 -d > ~/hiero-test/bug3/main_test.go
-          cd ~/hiero-test && go mod tidy
-          go test ./bug3/ -v -run TestBug3 -timeout 30s
+          echo "=== Grep for CTF pattern ==="
+          grep -i "CTF{" homepage.html || echo "Not found directly"
+          grep -i "flag" homepage.html | head -20 || true
+          grep -i "key\|secret\|token\|encrypt\|decrypt\|cipher\|xor\|aes" homepage.html | head -20 || true
 
-      - name: Summary
-        if: always()
+      - name: Check .github/workflows exposure
         run: |
-          echo "========================================"
-          echo "Bug 1: SetNetworkUpdatePeriod(0) infinite goroutine loop"
-          echo "Bug 2: ClientFromConfigWithoutScheduleNetworkUpdate nil pointer panic"
-          echo "Bug 3: defer UpdateAddressBook inside retry loop - N deferred calls"
-          echo "========================================"
+          BASE="https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
+          for f in deploy.yml main.yml challenge.yml build.yml ci.yml cd.yml release.yml docker.yml; do
+            echo "--- /.github/workflows/$f ---"
+            curl -s -o /tmp/wf.txt -w "%{http_code}" "$BASE/.github/workflows/$f"
+            code=$(tail -1 /tmp/wf.txt 2>/dev/null || cat /tmp/wf.txt)
+            echo "HTTP: $code"
+            cat /tmp/wf.txt 2>/dev/null | head -50
+            echo ""
+          done
+
+      - name: Check common sensitive paths
+        run: |
+          BASE="https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
+          for path in \
+            "/.env" "/Dockerfile" "/docker-compose.yml" \
+            "/robots.txt" "/sitemap.xml" \
+            "/.git/config" "/.git/HEAD" \
+            "/config.js" "/config.json" \
+            "/api/flag" "/api/key" "/flag" \
+            "/static/js/main.js" "/js/app.js" "/bundle.js" \
+            "/assets/index.js" "/main.js" "/game.js"; do
+            result=$(curl -s -o /tmp/r.txt -w "%{http_code}" "$BASE$path")
+            if [ "$result" != "404" ] && [ "$result" != "000" ]; then
+              echo "✓ [$result] $path"
+              head -100 /tmp/r.txt
+              echo "---"
+            fi
+          done
+
+      - name: Deep scan JS for crypto artifacts
+        run: |
+          BASE="https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
+          # Try Vite/React build patterns
+          for path in \
+            "/assets/index.js" "/assets/main.js" \
+            "/static/js/main.chunk.js" "/static/js/bundle.js" \
+            "/dist/bundle.js" "/dist/main.js" \
+            "/_next/static/chunks/main.js" \
+            "/js/game.js" "/js/main.js"; do
+            result=$(curl -s -o /tmp/js.txt -w "%{http_code}" "$BASE$path")
+            if [ "$result" = "200" ]; then
+              echo "=== FOUND: $path ==="
+              # Search for flag or key patterns
+              grep -oP 'CTF\{[^}]+\}' /tmp/js.txt || true
+              grep -oP '[a-f0-9]{32,64}' /tmp/js.txt | head -10 || true
+              grep -i "flag\|key\|secret\|password" /tmp/js.txt | head -20 || true
+            fi
+          done
+
+      - name: Try WebSocket connection
+        run: |
+          pip install websocket-client -q
+          python3 - <<'EOF'
+          import websocket, json, time, threading
+
+          BASE = "ghostcrypt-2c7aa570.challenges.bsidessf.net"
+          results = []
+
+          def on_message(ws, msg):
+              print(f"WS MSG: {msg}")
+              results.append(msg)
+
+          def on_error(ws, err):
+              print(f"WS ERR: {err}")
+
+          def on_open(ws):
+              print("WS CONNECTED")
+              # Try common game messages
+              for payload in [
+                  '{"type":"init"}',
+                  '{"action":"start"}', 
+                  '{"cmd":"flag"}',
+                  '{"score":999999}',
+                  '{}',
+              ]:
+                  try:
+                      ws.send(payload)
+                      time.sleep(0.5)
+                  except:
+                      pass
+
+          for scheme in ["wss", "ws"]:
+              for path in ["/ws", "/game", "/socket", "/", "/api/ws"]:
+                  url = f"{scheme}://{BASE}{path}"
+                  print(f"Trying: {url}")
+                  try:
+                      ws = websocket.WebSocketApp(
+                          url,
+                          on_message=on_message,
+                          on_error=on_error,
+                          on_open=on_open
+                      )
+                      t = threading.Thread(target=ws.run_forever, kwargs={"ping_timeout": 3})
+                      t.daemon = True
+                      t.start()
+                      t.join(timeout=5)
+                      if results:
+                          print("GOT RESULTS:", results)
+                          break
+                  except Exception as e:
+                      print(f"  Error: {e}")
+          EOF
+
+      - name: Fetch full homepage JS and grep everything
+        run: |
+          BASE="https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
+          # Get all script src tags and fetch them
+          curl -s "$BASE/" > /tmp/index.html
+          echo "=== Full HTML ===" 
+          cat /tmp/index.html
+          
+          # Extract all script sources
+          python3 - <<'EOF'
+          import re, urllib.request, sys
+
+          with open('/tmp/index.html') as f:
+              html = f.read()
+
+          base = "https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
+          
+          # Find all JS files referenced
+          scripts = re.findall(r'src=["\']([^"\']+\.js[^"\']*)["\']', html)
+          scripts += re.findall(r'"(/[^"]+\.js)"', html)
+          scripts += re.findall(r"'(/[^']+\.js)'", html)
+          
+          print(f"Found {len(scripts)} scripts: {scripts}")
+          
+          for src in set(scripts):
+              url = src if src.startswith('http') else base + src
+              print(f"\n=== {url} ===")
+              try:
+                  req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                  resp = urllib.request.urlopen(req, timeout=10)
+                  content = resp.read().decode('utf-8', errors='replace')
+                  
+                  # Search for flag
+                  flags = re.findall(r'CTF\{[^}]+\}', content)
+                  if flags:
+                      print(f"🚩 FLAG FOUND: {flags}")
+                  
+                  # Search for hex keys
+                  keys = re.findall(r'[0-9a-fA-F]{32,}', content)
+                  if keys:
+                      print(f"Keys/hashes: {keys[:5]}")
+                  
+                  # Search for interesting strings
+                  for pattern in ['flag', 'key', 'secret', 'encrypt', 'decrypt', 'xor', 'aes', 'cipher']:
+                      matches = re.findall(f'.{{0,50}}{pattern}.{{0,50}}', content, re.IGNORECASE)
+                      if matches:
+                          print(f"  [{pattern}]: {matches[:3]}")
+                          
+              except Exception as e:
+                  print(f"Error: {e}")
+          EOF
