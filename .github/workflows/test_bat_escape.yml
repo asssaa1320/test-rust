@@ -1,4 +1,4 @@
-name: Solve Kitty Terminal Challenge
+name: Solve Kitty - Download Full Image
 
 on:
   workflow_dispatch:
@@ -7,243 +7,152 @@ jobs:
   solve:
     runs-on: ubuntu-latest
     steps:
-
-      - name: Install tools
+      - name: Download full flag.kitty and decode image
         run: |
-          sudo apt-get install -y socat netcat-openbsd 2>/dev/null || true
+          pip install pillow --break-system-packages -q
 
-      - name: Try TERM=xterm-kitty via env
-        run: |
-          # الـ challenge بيشوف TERM variable
-          # نبعت commands مع TERM=xterm-kitty
-          
           python3 - <<'EOF'
-          import socket, time, os
+          import socket, time, base64, zlib, re
 
           host = "kitty-7c6c7969.challenges.bsidessf.net"
           port = 8024
 
-          def send_recv(s, cmd, wait=1.5):
-              s.sendall(cmd)
-              time.sleep(wait)
-              data = b''
-              s.settimeout(2)
-              try:
-                  while True:
-                      chunk = s.recv(4096)
-                      if not chunk: break
-                      data += chunk
-              except:
-                  pass
-              return data
-
-          s = socket.create_connection((host, port), timeout=15)
+          s = socket.create_connection((host, port), timeout=30)
           s.settimeout(5)
-          
-          # Read initial prompt
-          time.sleep(2)
-          init = b''
-          try:
-              init = s.recv(4096)
-          except: pass
-          print("=== Initial ===")
-          print(repr(init))
-          print(init.decode('utf-8', errors='replace'))
-
-          # Try: export TERM=xterm-kitty then cat the flag
-          commands = [
-              b'export TERM=xterm-kitty\n',
-              b'export TERM_PROGRAM=kitty\n',
-              b'cat /home/ctf/flag.kitty\n',
-          ]
-
-          for cmd in commands:
-              out = send_recv(s, cmd)
-              print(f"\n=== After: {cmd.decode().strip()} ===")
-              print(repr(out))
-              print(out.decode('utf-8', errors='replace'))
-
-          s.close()
-          EOF
-
-      - name: Try Kitty terminal escape sequences
-        run: |
-          python3 - <<'EOF'
-          import socket, time
-
-          host = "kitty-7c6c7969.challenges.bsidessf.net"
-          port = 8024
-
-          def send_recv(s, data, wait=2.0):
-              s.sendall(data)
-              time.sleep(wait)
-              out = b''
-              s.settimeout(2)
-              try:
-                  while True:
-                      chunk = s.recv(4096)
-                      if not chunk: break
-                      out += chunk
-              except: pass
-              return out
-
-          s = socket.create_connection((host, port), timeout=15)
           time.sleep(2)
           try: s.recv(4096)
           except: pass
 
-          # Kitty identification via APC sequence
-          # Kitty uses: ESC_Ga=q,... ESC\ for graphics protocol
-          # Or DA1: ESC[c → kitty responds with: ESC[?62;c or similar
-          # Or: XTGETTCAP for kitty-specific capabilities
-          
-          tests = [
-              # Kitty keyboard protocol query
-              (b'\x1b[?u', "Kitty keyboard query"),
-              # Primary DA
-              (b'\x1b[0c', "Primary DA"),
-              # Secondary DA  
-              (b'\x1b[>0c', "Secondary DA"),
-              # Kitty graphics protocol - query
-              (b'\x1b_Gi=1,a=q;\x1b\\', "Kitty graphics query"),
-              # XTGETTCAP for kitty
-              (b'\x1bP+q6B756E697432 \x1b\\', "XTGETTCAP"),
-          ]
-
-          for seq, name in tests:
-              out = send_recv(s, seq, wait=1)
-              print(f"\n=== {name} ===")
-              print(repr(out))
-
-          s.close()
-          EOF
-
-      - name: Read flag with TERM=xterm-kitty set before connection
-        run: |
-          # The server likely checks TERM env var of the shell
-          # We need to set it BEFORE the shell starts
-          # Use stty or pass env via the protocol
-          
-          python3 - <<'EOF'
-          import socket, time
-
-          host = "kitty-7c6c7969.challenges.bsidessf.net"
-          port = 8024
-
-          def send_recv(s, cmd, wait=2.0):
-              if isinstance(cmd, str):
-                  cmd = cmd.encode()
+          def send_recv(cmd, wait=3.0):
+              if isinstance(cmd, str): cmd = cmd.encode()
               s.sendall(cmd)
               time.sleep(wait)
               out = b''
-              s.settimeout(2)
+              s.settimeout(3)
               try:
                   while True:
-                      chunk = s.recv(4096)
+                      chunk = s.recv(65536)
                       if not chunk: break
                       out += chunk
               except: pass
               return out
 
-          s = socket.create_connection((host, port), timeout=15)
-          time.sleep(2)
+          # Get the full file via base64
+          print("=== Getting file size ===")
+          out = send_recv('wc -c /home/ctf/flag.kitty\n')
+          print(out.decode('utf-8', errors='replace'))
+
+          print("=== Encoding full file as base64 ===")
+          # Use base64 to dump the entire binary file
+          out = send_recv('base64 /home/ctf/flag.kitty\n', wait=10)
+          raw_out = out.decode('utf-8', errors='replace')
+          
+          # Extract base64 data (remove prompt lines)
+          lines = raw_out.split('\n')
+          b64_lines = []
+          for line in lines:
+              line = line.strip()
+              # Skip shell prompt lines and command echo
+              if line and not line.startswith('ctf@') and not line.startswith('base64') and not line.startswith('$'):
+                  # Remove ANSI escape codes
+                  line = re.sub(r'\x1b\[[^m]*m', '', line)
+                  line = re.sub(r'\x1b\[[^A-Za-z]*[A-Za-z]', '', line)
+                  line = line.strip()
+                  if line and all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=' for c in line):
+                      b64_lines.append(line)
+
+          b64_data = ''.join(b64_lines)
+          print(f"Got {len(b64_data)} base64 chars")
+          
+          # Decode
           try:
-              banner = s.recv(4096)
-              print("Banner:", banner.decode('utf-8', errors='replace'))
-          except: pass
-
-          # Try various ways to set TERM
-          attempts = [
-              # Direct cat with TERM set
-              'TERM=xterm-kitty cat /home/ctf/flag.kitty\n',
-              # env command
-              'env TERM=xterm-kitty cat /home/ctf/flag.kitty\n',
-              # Check what file does
-              'file /home/ctf/flag.kitty\n',
-              # ls to see what's there
-              'ls -la /home/ctf/\n',
-              # Check if it's a script that checks TERM
-              'cat /home/ctf/flag.kitty\n',
-              # Check TERM variable
-              'echo TERM=$TERM\n',
-              # Check if there are other files
-              'ls -la /home/ctf/flag*\n',
-              # Try reading directly
-              'xxd /home/ctf/flag.kitty | head -20\n',
-              # Check file type
-              'file /home/ctf/flag.kitty\n',
-          ]
-
-          for cmd in attempts:
-              out = send_recv(s, cmd)
-              print(f"\n$ {cmd.strip()}")
-              print(out.decode('utf-8', errors='replace'))
+              raw_bytes = base64.b64decode(b64_data + '==')
+              print(f"Decoded: {len(raw_bytes)} bytes")
+              
+              with open('/tmp/flag.kitty', 'wb') as f:
+                  f.write(raw_bytes)
+              print("Saved raw file")
+          except Exception as e:
+              print(f"Base64 decode error: {e}")
+              # Save raw output for analysis
+              with open('/tmp/flag_raw_output.txt', 'w') as f:
+                  f.write(raw_out)
 
           s.close()
           EOF
 
-      - name: Send Kitty terminal ID in TERMINFO
+      - name: Parse Kitty Graphics Protocol and extract image
         run: |
-          # Maybe the challenge uses terminfo or checks terminal capabilities
-          # Kitty has unique terminfo: xterm-kitty
-          # Let's try sending the Kitty terminal response to queries
-          
           python3 - <<'EOF'
-          import socket, time
+          import base64, zlib, re, os
 
-          host = "kitty-7c6c7969.challenges.bsidessf.net"
-          port = 8024
-
-          s = socket.create_connection((host, port), timeout=15)
-          time.sleep(2)
-          try: s.recv(4096)
-          except: pass
-
-          def send_recv(s, data, wait=2.0):
-              if isinstance(data, str): data = data.encode()
-              s.sendall(data)
-              time.sleep(wait)
-              out = b''
-              s.settimeout(2)
-              try:
-                  while True:
-                      chunk = s.recv(4096)
-                      if not chunk: break
-                      out += chunk
-              except: pass
-              return out
-
-          # Kitty terminal responds to DA2 (Secondary Device Attributes) with:
-          # ESC[>1;4000;29c  (kitty version)
-          # So: server sends ESC[>c, we respond with kitty's response
-
-          # But actually: the SERVER checks OUR terminal type
-          # via TERM variable or by querying us
-          # 
-          # Sequence: server sends ESC[>c query → we respond as kitty
-          # ESC [ > 1 ; <version> ; 29 c
-
-          # First read what server sends us
-          time.sleep(1)
+          # Read the raw file
           try:
-              data = s.recv(4096)
-              print("Server sent:", repr(data))
-          except: pass
+              with open('/tmp/flag.kitty', 'rb') as f:
+                  data = f.read()
+              print(f"File size: {len(data)} bytes")
+          except:
+              print("flag.kitty not found, trying raw output...")
+              with open('/tmp/flag_raw_output.txt') as f:
+                  data = f.read().encode()
 
-          # Respond as Kitty terminal to DA2 query
-          # Kitty DA2 response: ESC [ > 1 ; 4000 ; 29 c
-          kitty_da2 = b'\x1b[>1;4000;29c'
+          # Kitty graphics protocol: ESC_G<params>;<data>ESC\
+          # Look for APC sequences: \x1b_G...\x1b\\ or just parse the params;data pattern
           
-          # Also try: set TERM via inline env
-          cmds = [
-              b'TERM=xterm-kitty bash -c "cat /home/ctf/flag.kitty"\n',
-              b'TERM=xterm-kitty sh -c "cat /home/ctf/flag.kitty"\n',
-          ]
+          # The file format from cat output:
+          # _Ga=T,q=2,f=24,o=z,m=1,s=800,v=427;<b64data>
+          # Then more chunks: _Gm=0;<b64data>  (m=0 = last chunk)
           
-          for cmd in cmds:
-              out = send_recv(s, cmd)
-              print(f"\nCmd: {cmd.decode().strip()}")
-              print(out.decode('utf-8', errors='replace'))
+          # Extract all chunks
+          text = data.decode('utf-8', errors='replace') if isinstance(data, bytes) else data
+          
+          # Pattern: _G<params>;<base64>
+          chunks = re.findall(r'_G([^;]+);([A-Za-z0-9+/=]+)', text)
+          print(f"Found {len(chunks)} chunks")
+          
+          if not chunks:
+              # Try raw bytes pattern
+              chunks = re.findall(rb'_G([^;]+);([A-Za-z0-9+/=]+)', data)
+              print(f"Found {len(chunks)} byte chunks")
+          
+          all_b64 = ''
+          width = height = fmt = 0
+          
+          for params_raw, b64 in chunks[:5]:
+              if isinstance(params_raw, bytes):
+                  params_raw = params_raw.decode()
+                  b64 = b64.decode()
+              params = dict(p.split('=') for p in params_raw.split(',') if '=' in p)
+              print(f"  Chunk params: {params}, b64_len={len(b64)}")
+              all_b64 += b64
+              if 's' in params: width = int(params['s'])
+              if 'v' in params: height = int(params['v'])
+              if 'f' in params: fmt = int(params['f'])
 
-          s.close()
+          print(f"\nImage: {width}x{height} fmt={fmt}")
+          print(f"Total b64 data: {len(all_b64)} chars")
+
+          # Try to decompress
+          try:
+              raw_img = base64.b64decode(all_b64 + '==')
+              print(f"Decoded: {len(raw_img)} bytes")
+              img_data = zlib.decompress(raw_img)
+              print(f"Decompressed: {len(img_data)} bytes")
+              
+              from PIL import Image
+              mode = 'RGB' if fmt == 24 else 'RGBA'
+              bpp = 3 if fmt == 24 else 4
+              img = Image.frombytes(mode, (width, height), img_data[:width*height*bpp])
+              img.save('/tmp/flag_image.png')
+              print("Saved: /tmp/flag_image.png")
+          except Exception as e:
+              print(f"Image decode error: {e}")
+              import traceback; traceback.print_exc()
           EOF
+
+      - name: Upload decoded image
+        uses: actions/upload-artifact@v4
+        with:
+          name: flag-image
+          path: /tmp/flag_image.png
+          if-no-files-found: warn
