@@ -1,4 +1,4 @@
-name: Solve GhostCrypt - Per-Char Verification
+name: Solve GhostCrypt - Fixed Lookup
 
 on:
   workflow_dispatch:
@@ -7,13 +7,17 @@ jobs:
   crack:
     runs-on: ubuntu-latest
     steps:
-      - name: Verify per-char + find flag
+      - name: Crack with fixed case-sensitive lookup
         run: |
           python3 - <<'EOF'
           import urllib.request, json, urllib.parse
+          from itertools import product as iproduct
 
           BASE  = "https://ghostcrypt-2c7aa570.challenges.bsidessf.net"
           alpha = 'abcdefghijklmnopqrstuvwxyz'
+          freq  = {'e':12.7,'t':9.1,'a':8.2,'o':7.5,'i':7.0,'n':6.7,'s':6.3,
+                   'h':6.1,'r':6.0,'d':4.3,'l':4.0,'c':2.8,'u':2.8,'m':2.4,
+                   'w':2.4,'f':2.2,'g':2.0,'y':2.0,'p':1.9,'b':1.5}
 
           def invoke(inc, arc):
               data = urllib.parse.urlencode({'incantation':inc,'arcana':arc}).encode()
@@ -28,64 +32,41 @@ jobs:
               d = json.loads(urllib.request.urlopen(req, timeout=10).read())
               return ''.join(c for c in d.get('playback_sequence',[]) if c!=' ').upper()
 
-          # ── Build full E table: E[k][p] = c (single-char key) ─────────
-          print("Building E table for all 26 key chars...")
-          E = {}
+          # Build E and D tables (all lowercase internally)
+          print("Building cipher tables...")
+          E = {}   # E[key_char][plain_lower] = cipher_lower
+          D = {}   # D[key_char][cipher_lower] = plain_lower
           for k in alpha:
-              row = invoke(alpha, k)
-              E[k] = dict(zip(alpha, row.lower().replace('j','j')))
-
-          # Build D (decrypt): D[k][c] = p
-          D = {}
-          for k in alpha:
+              row = invoke(alpha, k).lower()   # 26 chars, lowercase output
+              E[k] = dict(zip(alpha, row))
               D[k] = {c:p for p,c in E[k].items()}
 
-          # ── Get fresh cipher ───────────────────────────────────────────
           cipher = litany()
           print(f"Cipher: {cipher}")
 
-          # ── Brute force all 3-char keys using per-char D table ────────
-          from itertools import product as iproduct
-          freq = {'e':12.7,'t':9.1,'a':8.2,'o':7.5,'i':7.0,'n':6.7,'s':6.3,
-                  'h':6.1,'r':6.0,'d':4.3,'l':4.0,'c':2.8,'u':2.8,'m':2.4,
-                  'w':2.4,'f':2.2,'g':2.0,'y':2.0,'p':1.9,'b':1.5}
-
+          # Brute force key (length 3 per Kasiski)
           best = []
-          for klen in [3]:   # Kasiski = 3
-              for combo in iproduct(alpha, repeat=klen):
-                  key = ''.join(combo)
-                  pt_chars = []
-                  for i, ch in enumerate(cipher):
-                      k = key[i % klen]
-                      p = D[k].get(ch.upper(), D[k].get(ch))
-                      if p is None:
-                          # try lowercase lookup
-                          p = D[k].get(ch.lower().upper())
-                      pt_chars.append(p or '?')
-                  pt = ''.join(pt_chars)
-                  s  = sum(freq.get(c,0.1) for c in pt)
-                  best.append((s, key, pt))
+          for combo in iproduct(alpha, repeat=3):
+              key = ''.join(combo)
+              pt  = ''.join(D[key[i%3]].get(cipher[i].lower(), '?')
+                            for i in range(len(cipher)))
+              if '?' in pt:
+                  continue
+              s = sum(freq.get(c, 0.1) for c in pt)
+              best.append((s, key, pt))
 
           best.sort(reverse=True)
-          print("\nTop 10 candidates:")
-          for s, k, pt in best[:10]:
+          print("\nTop 20:")
+          for s, k, pt in best[:20]:
               print(f"  key={k}  score={s:.1f}  →  {pt}")
 
-          # ── Verify per-char: invoke each plain with its key char ──────
-          # For key K and plaintext P:
-          # cipher[i] should == invoke(P[i], K[i%klen]).upper()
-          print("\nVerifying top candidates (per-char)...")
-          for s, key, pt in best[:20]:
-              klen  = len(key)
-              match = True
-              for i, (pi, ci) in enumerate(zip(pt, cipher)):
-                  k    = key[i % klen]
-                  out  = invoke(pi, k)     # single char invocation
-                  if out.upper() != ci.upper():
-                      match = False
-                      break
-              print(f"  key={key}  pt={pt}  match={match}")
-              if match:
+          # Verify per-char via oracle
+          print("\nVerifying top candidates per-char...")
+          for s, key, pt in best[:30]:
+              ok = all(invoke(pt[i], key[i%3]).upper() == cipher[i].upper()
+                       for i in range(len(cipher)))
+              print(f"  key={key}  pt={pt}  match={ok}")
+              if ok:
                   print(f"\n  🚩 FLAG: CTF{{{pt}}}")
                   break
           EOF
