@@ -1,4 +1,4 @@
-name: Solve Kitty - Download Full Image
+name: Solve Kitty - Full File Download
 
 on:
   workflow_dispatch:
@@ -7,152 +7,153 @@ jobs:
   solve:
     runs-on: ubuntu-latest
     steps:
-      - name: Download full flag.kitty and decode image
-        run: |
-          pip install pillow --break-system-packages -q
+      - name: Install Pillow
+        run: pip install pillow --break-system-packages -q
 
+      - name: Download and decode flag.kitty
+        run: |
           python3 - <<'EOF'
-          import socket, time, base64, zlib, re
+          import socket, time, base64, zlib, re, os
+          from PIL import Image
 
           host = "kitty-7c6c7969.challenges.bsidessf.net"
           port = 8024
 
-          s = socket.create_connection((host, port), timeout=30)
-          s.settimeout(5)
-          time.sleep(2)
-          try: s.recv(4096)
-          except: pass
+          def connect():
+              s = socket.create_connection((host, port), timeout=30)
+              time.sleep(2)
+              drain(s)
+              return s
 
-          def send_recv(cmd, wait=3.0):
-              if isinstance(cmd, str): cmd = cmd.encode()
-              s.sendall(cmd)
-              time.sleep(wait)
-              out = b''
-              s.settimeout(3)
+          def drain(s, timeout=3):
+              s.settimeout(timeout)
+              buf = b''
               try:
                   while True:
                       chunk = s.recv(65536)
                       if not chunk: break
-                      out += chunk
+                      buf += chunk
               except: pass
-              return out
+              return buf
 
-          # Get the full file via base64
-          print("=== Getting file size ===")
-          out = send_recv('wc -c /home/ctf/flag.kitty\n')
-          print(out.decode('utf-8', errors='replace'))
+          def run(s, cmd, wait=5):
+              if isinstance(cmd, str): cmd = cmd.encode()
+              s.sendall(cmd + b'\n')
+              time.sleep(wait)
+              return drain(s, timeout=3)
 
-          print("=== Encoding full file as base64 ===")
-          # Use base64 to dump the entire binary file
-          out = send_recv('base64 /home/ctf/flag.kitty\n', wait=10)
-          raw_out = out.decode('utf-8', errors='replace')
-          
-          # Extract base64 data (remove prompt lines)
-          lines = raw_out.split('\n')
-          b64_lines = []
-          for line in lines:
-              line = line.strip()
-              # Skip shell prompt lines and command echo
-              if line and not line.startswith('ctf@') and not line.startswith('base64') and not line.startswith('$'):
-                  # Remove ANSI escape codes
-                  line = re.sub(r'\x1b\[[^m]*m', '', line)
-                  line = re.sub(r'\x1b\[[^A-Za-z]*[A-Za-z]', '', line)
-                  line = line.strip()
-                  if line and all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=' for c in line):
-                      b64_lines.append(line)
+          # ── Step 1: get file size ──────────────────────────────────────
+          s = connect()
+          out = run(s, 'wc -c /home/ctf/flag.kitty', wait=3)
+          print("Size:", out.decode(errors='replace').strip())
 
-          b64_data = ''.join(b64_lines)
-          print(f"Got {len(b64_data)} base64 chars")
-          
-          # Decode
-          try:
-              raw_bytes = base64.b64decode(b64_data + '==')
-              print(f"Decoded: {len(raw_bytes)} bytes")
+          # ── Step 2: check if python3 available ────────────────────────
+          out = run(s, 'which python3 python 2>/dev/null | head -1', wait=2)
+          py = out.decode(errors='replace').strip().split('\n')[-1].strip()
+          print("Python:", py)
+
+          # ── Step 3: get file via python3 base64 in chunks ─────────────
+          # Use python3 on server to base64 encode and print
+          chunk_size = 30000  # bytes per chunk
+          file_size  = 759436
+          num_chunks = (file_size + chunk_size - 1) // chunk_size
+          print(f"Downloading in {num_chunks} chunks of {chunk_size} bytes...")
+
+          all_data = b''
+          for i in range(num_chunks):
+              offset = i * chunk_size
+              cmd = (f'python3 -c "'
+                     f'import base64,sys; '
+                     f'f=open(chr(47)+chr(104)+chr(111)+chr(109)+chr(101)+chr(47)+chr(99)+chr(116)+chr(102)+chr(47)+chr(102)+chr(108)+chr(97)+chr(103)+chr(46)+chr(107)+chr(105)+chr(116)+chr(116)+chr(121),chr(114)+chr(98)); '
+                     f'f.seek({offset}); '
+                     f'sys.stdout.write(base64.b64encode(f.read({chunk_size})).decode()+chr(10))'
+                     f'"')
+              out = run(s, cmd, wait=4)
+              text = out.decode(errors='replace')
               
-              with open('/tmp/flag.kitty', 'wb') as f:
-                  f.write(raw_bytes)
-              print("Saved raw file")
-          except Exception as e:
-              print(f"Base64 decode error: {e}")
-              # Save raw output for analysis
-              with open('/tmp/flag_raw_output.txt', 'w') as f:
-                  f.write(raw_out)
+              # Extract base64 line (last non-prompt line)
+              b64 = ''
+              for line in text.split('\n'):
+                  line = re.sub(r'\x1b\[[^A-Za-z]*[A-Za-z]', '', line).strip()
+                  line = re.sub(r'\r', '', line)
+                  if re.match(r'^[A-Za-z0-9+/=]+$', line) and len(line) > 20:
+                      b64 = line
+              
+              if b64:
+                  chunk_bytes = base64.b64decode(b64 + '==')
+                  all_data += chunk_bytes
+                  print(f"  chunk {i+1}/{num_chunks}: {len(chunk_bytes)} bytes (total: {len(all_data)})")
+              else:
+                  print(f"  chunk {i+1}: FAILED, output={repr(text[:200])}")
 
           s.close()
-          EOF
+          print(f"\nTotal downloaded: {len(all_data)} bytes")
 
-      - name: Parse Kitty Graphics Protocol and extract image
-        run: |
-          python3 - <<'EOF'
-          import base64, zlib, re, os
+          # ── Step 4: save raw file ──────────────────────────────────────
+          with open('/tmp/flag.kitty', 'wb') as f:
+              f.write(all_data)
+          print("Saved /tmp/flag.kitty")
 
-          # Read the raw file
-          try:
-              with open('/tmp/flag.kitty', 'rb') as f:
-                  data = f.read()
-              print(f"File size: {len(data)} bytes")
-          except:
-              print("flag.kitty not found, trying raw output...")
-              with open('/tmp/flag_raw_output.txt') as f:
-                  data = f.read().encode()
+          # ── Step 5: parse Kitty Graphics Protocol ─────────────────────
+          text = all_data.decode('utf-8', errors='replace')
+          
+          # Find all _G chunks: _G<params>;<b64data>
+          chunks = re.findall(r'_G([^;\x1b\x07\x08\r\n]+);([A-Za-z0-9+/=]+)', text)
+          print(f"\nFound {len(chunks)} Kitty protocol chunks")
 
-          # Kitty graphics protocol: ESC_G<params>;<data>ESC\
-          # Look for APC sequences: \x1b_G...\x1b\\ or just parse the params;data pattern
-          
-          # The file format from cat output:
-          # _Ga=T,q=2,f=24,o=z,m=1,s=800,v=427;<b64data>
-          # Then more chunks: _Gm=0;<b64data>  (m=0 = last chunk)
-          
-          # Extract all chunks
-          text = data.decode('utf-8', errors='replace') if isinstance(data, bytes) else data
-          
-          # Pattern: _G<params>;<base64>
-          chunks = re.findall(r'_G([^;]+);([A-Za-z0-9+/=]+)', text)
-          print(f"Found {len(chunks)} chunks")
-          
-          if not chunks:
-              # Try raw bytes pattern
-              chunks = re.findall(rb'_G([^;]+);([A-Za-z0-9+/=]+)', data)
-              print(f"Found {len(chunks)} byte chunks")
-          
+          width = height = 0
+          compression = None
+          fmt = 24
           all_b64 = ''
-          width = height = fmt = 0
-          
-          for params_raw, b64 in chunks[:5]:
-              if isinstance(params_raw, bytes):
-                  params_raw = params_raw.decode()
-                  b64 = b64.decode()
-              params = dict(p.split('=') for p in params_raw.split(',') if '=' in p)
-              print(f"  Chunk params: {params}, b64_len={len(b64)}")
-              all_b64 += b64
-              if 's' in params: width = int(params['s'])
+
+          for params_str, b64 in chunks:
+              params = {}
+              for p in params_str.split(','):
+                  if '=' in p:
+                      k, v = p.split('=', 1)
+                      params[k.strip()] = v.strip()
+              if 's' in params: width  = int(params['s'])
               if 'v' in params: height = int(params['v'])
-              if 'f' in params: fmt = int(params['f'])
+              if 'f' in params: fmt    = int(params['f'])
+              if 'o' in params: compression = params['o']
+              all_b64 += b64
 
-          print(f"\nImage: {width}x{height} fmt={fmt}")
-          print(f"Total b64 data: {len(all_b64)} chars")
+          print(f"Image: {width}x{height}, fmt={fmt}, compression={compression}")
+          print(f"Total b64: {len(all_b64)} chars")
 
-          # Try to decompress
+          # ── Step 6: decode image ───────────────────────────────────────
           try:
-              raw_img = base64.b64decode(all_b64 + '==')
-              print(f"Decoded: {len(raw_img)} bytes")
-              img_data = zlib.decompress(raw_img)
-              print(f"Decompressed: {len(img_data)} bytes")
+              raw = base64.b64decode(all_b64 + '==')
+              print(f"Decoded: {len(raw)} bytes")
               
-              from PIL import Image
-              mode = 'RGB' if fmt == 24 else 'RGBA'
-              bpp = 3 if fmt == 24 else 4
-              img = Image.frombytes(mode, (width, height), img_data[:width*height*bpp])
+              if compression == 'z':
+                  img_data = zlib.decompress(raw)
+              else:
+                  img_data = raw
+              print(f"Decompressed: {len(img_data)} bytes")
+
+              mode = {24: 'RGB', 32: 'RGBA'}.get(fmt, 'RGB')
+              bpp  = {24: 3,     32: 4    }.get(fmt, 3)
+              expected = width * height * bpp
+              print(f"Expected pixels: {expected}, got: {len(img_data)}")
+
+              img = Image.frombytes(mode, (width, height), img_data[:expected])
               img.save('/tmp/flag_image.png')
-              print("Saved: /tmp/flag_image.png")
+              print("✓ Saved /tmp/flag_image.png")
+
           except Exception as e:
-              print(f"Image decode error: {e}")
+              print(f"Error: {e}")
               import traceback; traceback.print_exc()
+
+              # Try saving raw bytes as-is for inspection
+              with open('/tmp/flag_raw.bin', 'wb') as f:
+                  f.write(all_data[:10000])
           EOF
 
-      - name: Upload decoded image
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: flag-image
-          path: /tmp/flag_image.png
-          if-no-files-found: warn
+          name: kitty-flag
+          path: |
+            /tmp/flag_image.png
+            /tmp/flag.kitty
