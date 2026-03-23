@@ -47,25 +47,23 @@ jobs:
       - name: Build d8 — Debug (for DCHECK)
         if: steps.cache-build.outputs.cache-hit != 'true'
         run: |
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           cd v8
-          # v8gen.py creates the directory AND writes args.gn
-          # We must pass args via --extra-flags or write AFTER generation
-          python3 tools/dev/v8gen.py x64.debug
-          # args.gn now exists — safe to append
-          echo 'v8_enable_maglev = true'      >> out/x64.debug/args.gn
-          echo 'is_debug = true'              >> out/x64.debug/args.gn
-          echo 'v8_enable_slow_dchecks = true' >> out/x64.debug/args.gn
-          # Verify the file looks correct before building
+          # Write args.gn directly then call gn gen (skip v8gen.py wrapper)
+          mkdir -p out/x64.debug
+          printf 'is_debug = true\ntarget_cpu = "x64"\nv8_enable_maglev = true\nv8_enable_slow_dchecks = true\nuse_goma = false\nis_clang = true\n' > out/x64.debug/args.gn
+          gn gen out/x64.debug
           echo "=== args.gn (debug) ===" && cat out/x64.debug/args.gn
           ninja -C out/x64.debug d8
 
       - name: Build d8 — Release (for silent corruption)
         if: steps.cache-build.outputs.cache-hit != 'true'
         run: |
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           cd v8
-          python3 tools/dev/v8gen.py x64.release
-          echo 'v8_enable_maglev = true' >> out/x64.release/args.gn
-          echo 'is_debug = false'        >> out/x64.release/args.gn
+          mkdir -p out/x64.release
+          printf 'is_debug = false\ntarget_cpu = "x64"\nv8_enable_maglev = true\nuse_goma = false\nis_clang = true\n' > out/x64.release/args.gn
+          gn gen out/x64.release
           echo "=== args.gn (release) ===" && cat out/x64.release/args.gn
           ninja -C out/x64.release d8
 
