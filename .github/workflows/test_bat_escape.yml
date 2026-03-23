@@ -48,13 +48,15 @@ jobs:
         if: steps.cache-build.outputs.cache-hit != 'true'
         run: |
           cd v8
+          # v8gen.py creates the directory AND writes args.gn
+          # We must pass args via --extra-flags or write AFTER generation
           python3 tools/dev/v8gen.py x64.debug
-          # Enable Maglev, keep DCHECKs
-          cat >> out/x64.debug/args.gn << 'EOF'
-          v8_enable_maglev = true
-          is_debug = true
-          v8_enable_slow_dchecks = true
-          EOF
+          # args.gn now exists — safe to append
+          echo 'v8_enable_maglev = true'      >> out/x64.debug/args.gn
+          echo 'is_debug = true'              >> out/x64.debug/args.gn
+          echo 'v8_enable_slow_dchecks = true' >> out/x64.debug/args.gn
+          # Verify the file looks correct before building
+          echo "=== args.gn (debug) ===" && cat out/x64.debug/args.gn
           ninja -C out/x64.debug d8
 
       - name: Build d8 — Release (for silent corruption)
@@ -62,10 +64,9 @@ jobs:
         run: |
           cd v8
           python3 tools/dev/v8gen.py x64.release
-          cat >> out/x64.release/args.gn << 'EOF'
-          v8_enable_maglev = true
-          is_debug = false
-          EOF
+          echo 'v8_enable_maglev = true' >> out/x64.release/args.gn
+          echo 'is_debug = false'        >> out/x64.release/args.gn
+          echo "=== args.gn (release) ===" && cat out/x64.release/args.gn
           ninja -C out/x64.release d8
 
       - name: Upload d8 binaries
