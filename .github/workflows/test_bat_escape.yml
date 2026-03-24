@@ -1,11 +1,13 @@
 name: V8 Bug Research & Auto-Verify
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     branches: [ main, master ]
-    
   workflow_dispatch: 
+
+# إضافة المتغير هنا يحل المشكلة لكل الخطوات (Steps)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   v8-poc-test:
@@ -16,47 +18,35 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1. تثبيت jsvu وتشغيلها باستخدام الـ Flags (بدون أسئلة)
+      # تثبيت jsvu وتشغيلها باستخدام الـ Flags
       - name: Install v8 via jsvu
         run: |
           npm install -g jsvu
-          # --os=linux64 لتحديد النظام
-          # --engines=v8 لتحديد المحرك
           jsvu --os=linux64 --engines=v8
-          
-          # إضافة المسار لبيئة GitHub
           echo "$HOME/.jsvu/bin" >> $GITHUB_PATH
 
-      # 2. تشغيل الـ PoC ومقارنة النتائج
+      # تشغيل الـ PoC ومقارنة النتائج
       - name: Execute PoC Comparison
         run: |
-          # التأكد من المسار للخطوة الحالية
           export PATH="$HOME/.jsvu/bin:$PATH"
           
-          # jsvu تنزل الملف باسم v8
-          if ! command -v v8 &> /dev/null; then
-            echo "Error: v8 engine not found in $HOME/.jsvu/bin"
-            ls -R $HOME/.jsvu/bin
-            exit 1
-          fi
-
+          V8_EXEC=$(command -v v8 || command -v v8-debug)
+          
           echo "Running Baseline (Jitless)..."
-          v8 --jitless poc_vuln06_trigger.js > baseline.txt
+          $V8_EXEC --jitless poc_vuln06_trigger.js > baseline.txt
           
           echo "Running Maglev (Trigger)..."
-          # تفعيل Maglev وتطبيق الفلتر لمحاكاة الثغرة في FoldBranch
-          v8 --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
+          $V8_EXEC --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
           
           echo "Comparing Outputs..."
           if diff baseline.txt maglev.txt; then
             echo "✅ No mismatch detected."
           else
-            echo "❌ MISMATCH DETECTED! JIT Logic Error Confirmed."
+            echo "❌ MISMATCH DETECTED!"
             diff baseline.txt maglev.txt
             exit 1
           fi
 
-      # 3. رفع التقارير في حال الفشل أو النجاح
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
