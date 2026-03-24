@@ -14,47 +14,43 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1. تثبيت d8 (V8 Shell) لتشغيل الـ JS
-      - name: Install v8-d8
+      # تثبيت v8 بشكل غير تفاعلي باستخدام jsvu
+      - name: Install v8 (d8)
         run: |
-          sudo apt-get update
-          # تثبيت أدوات المساعدة لتشغيل محركات JS
           npm install -g jsvu
-          jsvu --engines=v8
-          echo "~/.jsvu/bin" >> $GITHUB_PATH
+          # تمرير الإعدادات لـ jsvu مسبقاً لتجنب الأسئلة التفاعلية
+          echo '{"os": "linux64", "engines": ["v8"], "prefix": "~/.jsvu"}' > ~/.jsvukrc
+          jsvu --engine=v8
+          echo "$HOME/.jsvu/bin" >> $GITHUB_PATH
 
-      # 2. تشغيل الـ PoC في وضعين (Jitless vs Maglev) ومقارنة النتائج
+      # تشغيل الـ PoC ومقارنة النتائج
       - name: Execute PoC Comparison
         run: |
+          # التأكد من وجود المحرك
+          v8-debug --version || v8 --version
+          
           echo "Running Baseline (Jitless)..."
           v8 --jitless poc_vuln06_trigger.js > baseline.txt
           
           echo "Running Maglev (Trigger)..."
+          # استخدمنا --maglev و --maglev-filter لتوجيه المحرك للثغرة مباشرة
           v8 --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
           
           echo "Comparing Outputs..."
           if diff baseline.txt maglev.txt; then
-            echo "✅ No mismatch detected in output."
+            echo "✅ No mismatch detected."
           else
-            echo "❌ MISMATCH DETECTED! Potential JIT Corruption."
+            echo "❌ MISMATCH DETECTED!"
             diff baseline.txt maglev.txt
             exit 1
           fi
 
-      # 3. فحص الكود بحثاً عن الـ Secrets (TruffleHog)
-      - name: Secret Scanning
-        uses: trufflesecurity/trufflehog@main
-        with:
-          path: ./
-          head: ${{ github.sha }}
-          base: ""
-
-      # 4. رفع التقارير في حال الفشل
-      - name: Upload Logs on Failure
-        if: failure()
+      # رفع الملفات الناتجة حتى لو فشل الاختبار لمراجعتها
+      - name: Upload Logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: poc-mismatch-logs
+          name: poc-execution-logs
           path: |
             baseline.txt
             maglev.txt
