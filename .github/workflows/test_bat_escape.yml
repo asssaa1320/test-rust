@@ -14,40 +14,36 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1. تثبيت jsvu وتشغيلها بطريقة إجبارية (Force)
-      - name: Install v8 via jsvu (Non-Interactive)
+      # 1. تثبيت jsvu وتشغيلها باستخدام الـ Flags (بدون أسئلة)
+      - name: Install v8 via jsvu
         run: |
           npm install -g jsvu
-          # إرسال الاختيارات يدوياً (الخيار 3 عادة هو Linux 64-bit)
-          # ثم تحديد محرك v8 فقط
-          echo "3
-          v8" | jsvu
+          # --os=linux64 لتحديد النظام
+          # --engines=v8 لتحديد المحرك
+          jsvu --os=linux64 --engines=v8
           
-          # إضافة المسار للمستقبل
+          # إضافة المسار لبيئة GitHub
           echo "$HOME/.jsvu/bin" >> $GITHUB_PATH
 
       # 2. تشغيل الـ PoC ومقارنة النتائج
       - name: Execute PoC Comparison
         run: |
-          # التأكد من المسار محلياً للخطوة الحالية
+          # التأكد من المسار للخطوة الحالية
           export PATH="$HOME/.jsvu/bin:$PATH"
           
-          # jsvu تنزل الملف باسم v8 أو v8-debug
-          V8_EXEC=$(command -v v8 || command -v v8-debug)
-          
-          if [ -z "$V8_EXEC" ]; then
-            echo "Error: V8 engine not found. Checking directory content:"
-            ls -R $HOME/.jsvu/bin || echo "Bin folder empty"
+          # jsvu تنزل الملف باسم v8
+          if ! command -v v8 &> /dev/null; then
+            echo "Error: v8 engine not found in $HOME/.jsvu/bin"
+            ls -R $HOME/.jsvu/bin
             exit 1
           fi
 
-          echo "Using V8 from: $V8_EXEC"
-
           echo "Running Baseline (Jitless)..."
-          $V8_EXEC --jitless poc_vuln06_trigger.js > baseline.txt
+          v8 --jitless poc_vuln06_trigger.js > baseline.txt
           
           echo "Running Maglev (Trigger)..."
-          $V8_EXEC --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
+          # تفعيل Maglev وتطبيق الفلتر لمحاكاة الثغرة في FoldBranch
+          v8 --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
           
           echo "Comparing Outputs..."
           if diff baseline.txt maglev.txt; then
@@ -58,7 +54,7 @@ jobs:
             exit 1
           fi
 
-      # 3. رفع التقارير
+      # 3. رفع التقارير في حال الفشل أو النجاح
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
