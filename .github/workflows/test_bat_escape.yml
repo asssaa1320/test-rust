@@ -14,38 +14,46 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # تثبيت v8 بشكل غير تفاعلي باستخدام jsvu
+      # 1. تثبيت v8 بشكل صامت تماماً
       - name: Install v8 (d8)
         run: |
           npm install -g jsvu
-          # تمرير الإعدادات لـ jsvu مسبقاً لتجنب الأسئلة التفاعلية
-          echo '{"os": "linux64", "engines": ["v8"], "prefix": "~/.jsvu"}' > ~/.jsvukrc
+          # إعداد ملف jsvukrc لتحديد النظام والمحرك
+          echo '{"os": "linux64", "engines": ["v8"], "prefix": "/home/runner/.jsvu"}' > ~/.jsvukrc
           jsvu --engine=v8
-          echo "$HOME/.jsvu/bin" >> $GITHUB_PATH
+          # إضافة المسار لبيئة التشغيل
+          echo "/home/runner/.jsvu/bin" >> $GITHUB_PATH
 
-      # تشغيل الـ PoC ومقارنة النتائج
+      # 2. تشغيل الـ PoC مع التأكد من المسار
       - name: Execute PoC Comparison
         run: |
-          # التأكد من وجود المحرك
-          v8-debug --version || v8 --version
+          # تعريف المسار محلياً للتأكيد في هذه الخطوة
+          export PATH="/home/runner/.jsvu/bin:$PATH"
           
+          # التحقق من أن v8 يعمل
+          if ! command -v v8 &> /dev/null; then
+            echo "Error: v8 not found in PATH"
+            ls -R /home/runner/.jsvu/bin
+            exit 1
+          fi
+
           echo "Running Baseline (Jitless)..."
           v8 --jitless poc_vuln06_trigger.js > baseline.txt
           
           echo "Running Maglev (Trigger)..."
-          # استخدمنا --maglev و --maglev-filter لتوجيه المحرك للثغرة مباشرة
+          # تفعيل Maglev وتطبيق الفلتر لمحاكاة الثغرة في FoldBranch
           v8 --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
           
           echo "Comparing Outputs..."
           if diff baseline.txt maglev.txt; then
             echo "✅ No mismatch detected."
           else
-            echo "❌ MISMATCH DETECTED!"
+            echo "❌ MISMATCH DETECTED! JIT Logic Error Confirmed."
             diff baseline.txt maglev.txt
             exit 1
           fi
 
-      # رفع الملفات الناتجة حتى لو فشل الاختبار لمراجعتها
+      # 3. رفع التقارير حتى في حالة الفشل لمراجعتها
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
