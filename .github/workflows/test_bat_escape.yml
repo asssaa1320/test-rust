@@ -14,35 +14,35 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1. تثبيت v8 بشكل صامت تماماً
+      # 1. تحميل v8 (d8) مباشرة من Google Storage (أسرع وأضمن)
       - name: Install v8 (d8)
         run: |
-          npm install -g jsvu
-          # إعداد ملف jsvukrc لتحديد النظام والمحرك
-          echo '{"os": "linux64", "engines": ["v8"], "prefix": "/home/runner/.jsvu"}' > ~/.jsvukrc
-          jsvu --engine=v8
-          # إضافة المسار لبيئة التشغيل
-          echo "/home/runner/.jsvu/bin" >> $GITHUB_PATH
+          # تحميل أحدث نسخة مستقرة من d8 لنظام لينكس
+          curl -fLO https://storage.googleapis.com/chromium-v8/built-ins/x64.release/d8.zip
+          sudo apt-get install -y unzip
+          unzip d8.zip -d v8_bin
+          # إضافة المجلد للمسار
+          echo "$(pwd)/v8_bin" >> $GITHUB_PATH
+          # إعطاء صلاحيات التنفيذ
+          chmod +x v8_bin/d8
 
-      # 2. تشغيل الـ PoC مع التأكد من المسار
+      # 2. تشغيل الـ PoC ومقارنة النتائج
       - name: Execute PoC Comparison
         run: |
-          # تعريف المسار محلياً للتأكيد في هذه الخطوة
-          export PATH="/home/runner/.jsvu/bin:$PATH"
+          # التأكد من أن d8 متاح
+          export PATH="$(pwd)/v8_bin:$PATH"
           
-          # التحقق من أن v8 يعمل
-          if ! command -v v8 &> /dev/null; then
-            echo "Error: v8 not found in PATH"
-            ls -R /home/runner/.jsvu/bin
+          if ! command -v d8 &> /dev/null; then
+            echo "Error: d8 (v8) not found even after direct install"
             exit 1
           fi
 
           echo "Running Baseline (Jitless)..."
-          v8 --jitless poc_vuln06_trigger.js > baseline.txt
+          d8 --jitless poc_vuln06_trigger.js > baseline.txt
           
           echo "Running Maglev (Trigger)..."
-          # تفعيل Maglev وتطبيق الفلتر لمحاكاة الثغرة في FoldBranch
-          v8 --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
+          # استخدام d8 بدلاً من v8 وتمرير flags الـ Maglev
+          d8 --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
           
           echo "Comparing Outputs..."
           if diff baseline.txt maglev.txt; then
@@ -53,7 +53,7 @@ jobs:
             exit 1
           fi
 
-      # 3. رفع التقارير حتى في حالة الفشل لمراجعتها
+      # 3. رفع التقارير
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
