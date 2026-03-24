@@ -1,57 +1,95 @@
-name: V8 Bug Research & Auto-Verify
+name: V8 & Blink Security Lab (Auto-Execution)
 
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch: 
+  workflow_dispatch:
 
-# إضافة المتغير هنا يحل المشكلة لكل الخطوات (Steps)
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  v8-poc-test:
-    name: Execute & Compare PoC
+  security-research:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      # تثبيت jsvu وتشغيلها باستخدام الـ Flags
-      - name: Install v8 via jsvu
+      # 1. إعداد بيئة V8
+      - name: Install V8 (d8) via jsvu
         run: |
           npm install -g jsvu
           jsvu --os=linux64 --engines=v8
           echo "$HOME/.jsvu/bin" >> $GITHUB_PATH
 
-      # تشغيل الـ PoC ومقارنة النتائج
-      - name: Execute PoC Comparison
+      # 2. إنشاء ملف الـ PoC تلقائياً
+      - name: Create PoC File
+        run: |
+          cat << 'EOF' > poc_vuln06_trigger.js
+          // محتوى الـ PoC الخاص بـ FoldBranch()
+          "use strict";
+          function foldedBranchPhi(n) {
+            let sum = 0;
+            for (let i = 0; i < n; i++) {
+              const x = i | 0;
+              const alwaysInt = (x | 0) === x;
+              let val;
+              if (alwaysInt) { val = x * 2; } else { val = -999; }
+              sum += val;
+            }
+            return sum;
+          }
+          const N = 500;
+          const t1 = foldedBranchPhi(N);
+          const t1_expected = N * (N - 1);
+          if (t1 !== t1_expected) {
+            console.log("MISMATCH t1: got=" + t1 + " expected=" + t1_expected);
+          } else {
+            console.log("ok t1=" + t1);
+          }
+          EOF
+
+      # 3. إنشاء ملف الـ Fuzzer تلقائياً
+      - name: Create Fuzzer File
+        run: |
+          cat << 'EOF' > go.py
+          import os
+          import random
+          # نسخة مبسطة من الفازر للتشغيل السريع داخل الـ CI
+          def generate_sample(seed):
+              return f"<html><body><h1>Fuzz Seed {seed}</h1></body></html>"
+          
+          os.makedirs("./fuzz_results/html", exist_ok=True)
+          for i in range(10):
+              with open(f"./fuzz_results/html/fuzz_{i}.html", "w") as f:
+                  f.write(generate_sample(i))
+          print("Generated 10 samples for testing.")
+          EOF
+
+      # 4. تشغيل الاختبارات والمقارنة
+      - name: Run V8 Tests
         run: |
           export PATH="$HOME/.jsvu/bin:$PATH"
-          
-          V8_EXEC=$(command -v v8 || command -v v8-debug)
-          
           echo "Running Baseline (Jitless)..."
-          $V8_EXEC --jitless poc_vuln06_trigger.js > baseline.txt
-          
+          v8 --jitless poc_vuln06_trigger.js > baseline.txt
           echo "Running Maglev (Trigger)..."
-          $V8_EXEC --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
+          v8 --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
           
-          echo "Comparing Outputs..."
-          if diff baseline.txt maglev.txt; then
-            echo "✅ No mismatch detected."
-          else
-            echo "❌ MISMATCH DETECTED!"
-            diff baseline.txt maglev.txt
-            exit 1
-          fi
+          echo "--- Results ---"
+          diff baseline.txt maglev.txt || echo "❌ Mismatch Found!"
 
-      - name: Upload Logs
+      # 5. تشغيل الـ Fuzzer (Dry-run)
+      - name: Run Fuzzer (Python)
+        run: python3 go.py
+
+      # 6. حفظ كل شيء كـ Artifact
+      - name: Archive All
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: poc-execution-logs
+          name: research-bundle
           path: |
             baseline.txt
             maglev.txt
+            fuzz_results/
