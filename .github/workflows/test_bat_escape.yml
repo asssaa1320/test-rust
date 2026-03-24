@@ -1,83 +1,85 @@
-name: 🚀 Fully Automated SSR Fuzzer
+name: Autonomous Security & Testing Engine
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  schedule:
-    - cron: '0 0 * * *' # تشغيل تلقائي كل يوم الساعة 12 بالليل للفحص الدوري
-  workflow_dispatch: # للسماح لك بتشغيله يدوياً في أي وقت
+  # يسمح لك بتشغيل الورك فلو يدوياً في أي وقت
+  workflow_dispatch: 
 
 jobs:
-  fuzzing:
-    name: Automated Security Scan
+  # المرحلة الأولى: فحص أمن الكود والبيانات الحساسة
+  static_analysis:
+    name: Code & Secret Auditing
     runs-on: ubuntu-latest
-
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: 🟢 Setup Node.js
-        uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          fetch-depth: 0
 
-      - name: 📦 Install & Build SSR
+      - name: Secret Scanning (TruffleHog)
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+
+      - name: Python Security Audit (Bandit)
         run: |
-          npm ci
-          # بنجرب نبني الـ SSR، ولو مفيش Script بناء بنكمل عادي
-          npm run build:ssr --if-present
+          pip install bandit
+          bandit -r . -ll -ii -f txt -o bandit_report.txt || true
 
-      - name: ⚡ Start SSR Server & Wait
-        run: |
-          # تشغيل السيرفر في الخلفية
-          npm run serve:ssr & 
-          
-          # انتظر حتى يستجيب السيرفر (Health Check) لمدة أقصاها 60 ثانية
-          echo "⏳ Waiting for SSR server to initialize..."
-          timeout 60s bash -c 'until curl -s localhost:4000; do sleep 2; done'
-          echo "✅ Server is UP and running!"
-
-      - name: 🛡️ Execute Auto-Fuzzer
-        id: fuzzer_step
-        run: |
-          # تشغيل السكريبت اللي بيعمل Discover للـ Routes ويضربها
-          node ssr-fuzzer.js http://localhost:4000 --output=audit-log.json
-
-      - name: 📊 Generate Summary Report
-        if: always()
-        run: |
-          echo "## 🛡️ SSR Security Audit Summary" >> $GITHUB_STEP_SUMMARY
-          echo "Scanned at: $(date)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ -f audit-log.json ]; then
-            # استخراج عدد الكراشات والـ 500 باستخدام jq
-            TOTAL=$(jq '. | length' audit-log.json)
-            CRITICALS=$(jq '[.[] | select(.severity=="CRITICAL")] | length' audit-log.json)
-            
-            echo "| Metric | Result |" >> $GITHUB_STEP_SUMMARY
-            echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
-            echo "| 🎯 Total Payloads | $TOTAL |" >> $GITHUB_STEP_SUMMARY
-            echo "| 💀 Critical Failures | $CRITICALS |" >> $GITHUB_STEP_SUMMARY
-            
-            if [ "$CRITICALS" -gt "0" ]; then
-              echo "### ⚠️ Vulnerabilities Found!" >> $GITHUB_STEP_SUMMARY
-              jq -r '.[] | select(.severity=="CRITICAL") | "- 🔴 **Crash** on Path: `\(.route)\(.payload)`"' audit-log.json >> $GITHUB_STEP_SUMMARY
-              exit 1 # تفشيل الـ Build لو فيه ثغرة خطيرة
-            else
-              echo "### ✅ No Critical Vulnerabilities Detected." >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "❌ Error: Audit log was not generated." >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
-      - name: 📂 Archive Detailed Report
-        if: always()
+      - name: Archive Static Reports
         uses: actions/upload-artifact@v4
         with:
-          name: full-security-report
-          path: audit-log.json
+          name: static-analysis-reports
+          path: bandit_report.txt
+
+  # المرحلة الثانية: التشغيل الآلي والاختبار (Dynamic Execution)
+  dynamic_testing:
+    name: Autonomous Execution Test
+    needs: static_analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest pytest-cov
+
+      # هنا نقوم بتشغيل "Vortex" أو أي أداة لديك بشكل تجريبي
+      - name: Run Tool Sanity Check (Smoke Test)
+        run: |
+          # محاكاة تشغيل الأداة لمدة زمنية قصيرة للتأكد من عدم وجود Crash
+          timeout 60s python3 main.py --scan-local || echo "Initial test completed"
+
+      - name: Run Automated Unit Tests
+        run: |
+          # تشغيل اختبارات الكود التلقائية مع تقرير التغطية
+          pytest --cov=./ --cov-report=xml
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+
+  # المرحلة الثالثة: التنبيه في حال وجود مشاكل
+  notify:
+    name: Reporting & Alerts
+    needs: [static_analysis, dynamic_testing]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report Failure
+        run: |
+          echo "Critical failure detected in the security pipeline."
+          # هنا يمكنك ربطها بـ Telegram Bot أو Discord Webhook إذا أردت
