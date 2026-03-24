@@ -1,359 +1,83 @@
-#!/usr/bin/env node
-/**
- * Angular SSR Comprehensive Fuzzer
- * Covers:
- *   1. SSR Server crash detection (DoS)
- *   2. decodeURIComponent malformed payloads
- *   3. URL parser bypasses
- *
- * Usage:
- *   node ssr-fuzzer.js [target] [options]
- *   node ssr-fuzzer.js http://localhost:4000
- *   node ssr-fuzzer.js http://localhost:4000 --delay 100 --output results.json
- */
+name: 🚀 Fully Automated SSR Fuzzer
 
-const http = require("http");
-const https = require("https");
-const fs = require("fs");
-const { URL } = require("url");
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 0 * * *' # تشغيل تلقائي كل يوم الساعة 12 بالليل للفحص الدوري
+  workflow_dispatch: # للسماح لك بتشغيله يدوياً في أي وقت
 
-// ─── CLI Args ────────────────────────────────────────────────────────────────
-const args = process.argv.slice(2);
-const TARGET = args.find((a) => a.startsWith("http")) || "http://localhost:4000";
-const DELAY_MS = parseInt(args.find((a) => a.startsWith("--delay="))?.split("=")[1] || "200");
-const OUTPUT_FILE = args.find((a) => a.startsWith("--output="))?.split("=")[1] || null;
-const TIMEOUT_MS = 5000;
+jobs:
+  fuzzing:
+    name: Automated Security Scan
+    runs-on: ubuntu-latest
 
-// ─── Colors ──────────────────────────────────────────────────────────────────
-const C = {
-  reset: "\x1b[0m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  cyan: "\x1b[36m",
-  gray: "\x1b[90m",
-  bold: "\x1b[1m",
-  magenta: "\x1b[35m",
-};
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
 
-// ─── Payload Categories ───────────────────────────────────────────────────────
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
 
-/**
- * CATEGORY 1: decodeURIComponent crash payloads
- * هدفها: URIError → unhandled crash
- */
-const DECODE_URI_PAYLOADS = [
-  // Incomplete percent sequences
-  "%", "%%", "%2", "%G", "%GG", "%ZZ", "%XY",
-  "/%GG", "/%ZZ", "/%XY", "/%G", "/%%",
-  "/a%GGb", "/test%ZZpath", "/%GG/%ZZ",
+      - name: 📦 Install & Build SSR
+        run: |
+          npm ci
+          # بنجرب نبني الـ SSR، ولو مفيش Script بناء بنكمل عادي
+          npm run build:ssr --if-present
 
-  // High bytes
-  "%C0", "%C1", "%FE", "%FF",
-  "/%C0%80",  // overlong UTF-8
+      - name: ⚡ Start SSR Server & Wait
+        run: |
+          # تشغيل السيرفر في الخلفية
+          npm run serve:ssr & 
+          
+          # انتظر حتى يستجيب السيرفر (Health Check) لمدة أقصاها 60 ثانية
+          echo "⏳ Waiting for SSR server to initialize..."
+          timeout 60s bash -c 'until curl -s localhost:4000; do sleep 2; done'
+          echo "✅ Server is UP and running!"
 
-  // Double encoding
-  "%2525", "%252F", "%25GG",
+      - name: 🛡️ Execute Auto-Fuzzer
+        id: fuzzer_step
+        run: |
+          # تشغيل السكريبت اللي بيعمل Discover للـ Routes ويضربها
+          node ssr-fuzzer.js http://localhost:4000 --output=audit-log.json
 
-  // Mixed valid/invalid
-  "/valid%2Fpath%GG",
-  "/%41%GG%42",  // A + invalid + B
+      - name: 📊 Generate Summary Report
+        if: always()
+        run: |
+          echo "## 🛡️ SSR Security Audit Summary" >> $GITHUB_STEP_SUMMARY
+          echo "Scanned at: $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f audit-log.json ]; then
+            # استخراج عدد الكراشات والـ 500 باستخدام jq
+            TOTAL=$(jq '. | length' audit-log.json)
+            CRITICALS=$(jq '[.[] | select(.severity=="CRITICAL")] | length' audit-log.json)
+            
+            echo "| Metric | Result |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+            echo "| 🎯 Total Payloads | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+            echo "| 💀 Critical Failures | $CRITICALS |" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "$CRITICALS" -gt "0" ]; then
+              echo "### ⚠️ Vulnerabilities Found!" >> $GITHUB_STEP_SUMMARY
+              jq -r '.[] | select(.severity=="CRITICAL") | "- 🔴 **Crash** on Path: `\(.route)\(.payload)`"' audit-log.json >> $GITHUB_STEP_SUMMARY
+              exit 1 # تفشيل الـ Build لو فيه ثغرة خطيرة
+            else
+              echo "### ✅ No Critical Vulnerabilities Detected." >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "❌ Error: Audit log was not generated." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
 
-  // Unicode edge cases
-  "/%uGGGG", "/%u00", "/%uXXXX",
-
-  // Null bytes
-  "/%00", "/\x00", "/%00%00",
-];
-
-/**
- * CATEGORY 2: URL parser bypass payloads
- * هدفها: تجاوز routing أو path normalization
- */
-const URL_PARSER_PAYLOADS = [
-  // Path traversal
-  "/../", "/../../etc/passwd",
-  "/%2e%2e/", "/%2e%2e%2f",
-  "/..%2F..%2F", "/%2F..%2F..",
-  "/..;/", "/;/../",
-
-  // Double slashes
-  "//", "///", "////",
-  "//admin", "//admin//",
-
-  // Backslash confusion
-  "/..\\", "/..%5C",
-  "/admin\\..\\", "/%5C%5C",
-
-  // Scheme confusion
-  "//evil.com/", "////evil.com/",
-
-  // Semicolon / matrix params
-  "/path;param=value",
-  "/path;/",
-  "/;admin",
-
-  // Fragment injection
-  "/#fragment", "/%23fragment",
-
-  // Query confusion
-  "/path?/../",
-  "/path?next=/admin",
-
-  // Encoded slashes
-  "/%2F", "/%2f",
-  "/a%2Fb", "/a%2fb",
-
-  // Unicode normalization
-  "/\u0041dmin",  // A = \u0041
-  "/%EF%BC%8F",  // fullwidth solidus ／
-  "/\uFE68",     // small reverse solidus
-
-  // Null & special chars
-  "/%00", "/\r\n", "/%0d%0a",
-  "/%09", "/%0b",
-
-  // Very long paths
-  "/" + "A".repeat(8000),
-  "/" + "%41".repeat(2000),
-  "/" + "a/".repeat(500),
-
-  // Whitespace
-  "/ ", "/%20", "/%09path",
-];
-
-/**
- * CATEGORY 3: Angular SSR specific payloads
- * هدفها: كسر الـ routing أو الـ rendering
- */
-const SSR_SPECIFIC_PAYLOADS = [
-  // Angular route edge cases
-  "/index.html",
-  "/index.html%00",
-  "//index.html",
-  "/./index.html",
-  "/../index.html",
-
-  // Static asset confusion
-  "/main.js", "/styles.css", "/favicon.ico",
-  "/main.js%GG",
-
-  // SSR hydration triggers
-  "/__webpack_hmr",
-  "/.well-known/",
-  "/api/../admin",
-
-  // Header injection via path
-  "/path%0d%0aX-Injected:evil",
-  "/path%0aSet-Cookie:evil=1",
-
-  // Express.js specific
-  "/path%20HTTP/1.1",
-  "//localhost:4000/admin",
-
-  // SSRF attempts
-  "/http://localhost:22/",
-  "/https://internal.service/",
-
-  // Template injection
-  "/{{7*7}}",
-  "/<%=7*7%>",
-  "/${7*7}",
-
-  // JSON path
-  "/[object Object]",
-  "/undefined",
-  "/null",
-  "/NaN",
-];
-
-// ─── All payloads combined with metadata ─────────────────────────────────────
-const ALL_PAYLOADS = [
-  ...DECODE_URI_PAYLOADS.map((p) => ({ path: p, category: "decode_uri", expected: "crash/500" })),
-  ...URL_PARSER_PAYLOADS.map((p) => ({ path: p, category: "url_parser", expected: "bypass/error" })),
-  ...SSR_SPECIFIC_PAYLOADS.map((p) => ({ path: p, category: "ssr_specific", expected: "varies" })),
-];
-
-// ─── HTTP Request Helper ──────────────────────────────────────────────────────
-function sendRequest(targetUrl, path) {
-  return new Promise((resolve) => {
-    const start = Date.now();
-
-    try {
-      const base = new URL(targetUrl);
-      const isHttps = base.protocol === "https:";
-      const lib = isHttps ? https : http;
-
-      const options = {
-        hostname: base.hostname,
-        port: base.port || (isHttps ? 443 : 80),
-        path: path,
-        method: "GET",
-        timeout: TIMEOUT_MS,
-        headers: {
-          "User-Agent": "AngularSSR-Fuzzer/1.0",
-          Accept: "*/*",
-        },
-        rejectUnauthorized: false,
-      };
-
-      const req = lib.request(options, (res) => {
-        let body = "";
-        res.on("data", (chunk) => (body += chunk));
-        res.on("end", () => {
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            body: body.slice(0, 200),
-            latency: Date.now() - start,
-            error: null,
-          });
-        });
-      });
-
-      req.on("timeout", () => {
-        req.destroy();
-        resolve({ status: null, error: "TIMEOUT", latency: Date.now() - start });
-      });
-
-      req.on("error", (e) => {
-        resolve({ status: null, error: e.code || e.message, latency: Date.now() - start });
-      });
-
-      req.end();
-    } catch (e) {
-      resolve({ status: null, error: e.message, latency: Date.now() - start });
-    }
-  });
-}
-
-// ─── Classify Result ──────────────────────────────────────────────────────────
-function classify(result, payload) {
-  const { status, error, latency } = result;
-
-  if (error === "ECONNREFUSED") return { severity: "CRITICAL", label: "💀 SERVER DEAD" };
-  if (error === "TIMEOUT") return { severity: "HIGH",     label: "⏱  TIMEOUT" };
-  if (status === 500)       return { severity: "HIGH",     label: "💥 500 ERROR" };
-  if (status === 400)       return { severity: "MEDIUM",   label: "⚠️  400 BAD REQ" };
-  if (status === 200 && payload.category === "decode_uri")
-                            return { severity: "INFO",     label: "✅ HANDLED (200)" };
-  if (status === 404)       return { severity: "LOW",      label: "🔵 404 NOT FOUND" };
-  if (status === 301 || status === 302)
-                            return { severity: "LOW",      label: "↪️  REDIRECT" };
-  if (status === null)      return { severity: "HIGH",     label: `❓ NO RESPONSE (${error})` };
-  return                           { severity: "INFO",     label: `ℹ️  ${status}` };
-}
-
-// ─── Main Fuzzer ──────────────────────────────────────────────────────────────
-async function fuzz() {
-  console.log(`\n${C.bold}${C.cyan}╔══════════════════════════════════════════════╗`);
-  console.log(`║     Angular SSR Comprehensive Fuzzer        ║`);
-  console.log(`╚══════════════════════════════════════════════╝${C.reset}\n`);
-  console.log(`${C.gray}Target  : ${C.reset}${TARGET}`);
-  console.log(`${C.gray}Payloads: ${C.reset}${ALL_PAYLOADS.length}`);
-  console.log(`${C.gray}Delay   : ${C.reset}${DELAY_MS}ms\n`);
-
-  // ── Baseline check ──
-  console.log(`${C.bold}[*] Baseline check...${C.reset}`);
-  const baseline = await sendRequest(TARGET, "/");
-  if (baseline.error === "ECONNREFUSED") {
-    console.log(`${C.red}✘ Server not reachable at ${TARGET}${C.reset}`);
-    console.log(`  Start your Angular SSR server first:\n  node dist/ssr-poc/server/server.mjs\n`);
-    process.exit(1);
-  }
-  console.log(`${C.green}✔ Server online — baseline HTTP ${baseline.status}${C.reset}\n`);
-
-  const results = [];
-  const findings = { CRITICAL: [], HIGH: [], MEDIUM: [], LOW: [], INFO: [] };
-  let crashed = false;
-
-  // ── Category headers ──
-  const categories = [...new Set(ALL_PAYLOADS.map((p) => p.category))];
-
-  for (const category of categories) {
-    const payloads = ALL_PAYLOADS.filter((p) => p.category === category);
-    const catLabels = {
-      decode_uri:   `${C.red}[1] decodeURIComponent Crash Payloads${C.reset}`,
-      url_parser:   `${C.yellow}[2] URL Parser Bypass Payloads${C.reset}`,
-      ssr_specific: `${C.magenta}[3] Angular SSR Specific Payloads${C.reset}`,
-    };
-    console.log(`\n${C.bold}${catLabels[category]}${C.reset}`);
-    console.log("─".repeat(55));
-
-    for (const payload of payloads) {
-      if (crashed) {
-        console.log(`${C.red}  [SKIP] Server crashed — stopping fuzzer${C.reset}`);
-        break;
-      }
-
-      const result = await sendRequest(TARGET, payload.path);
-      const { severity, label } = classify(result, payload);
-
-      const row = {
-        category,
-        path: payload.path,
-        status: result.status,
-        error: result.error,
-        latency: result.latency,
-        severity,
-        label,
-      };
-
-      results.push(row);
-      findings[severity].push(row);
-
-      // Print result
-      const pathStr = payload.path.slice(0, 40).padEnd(42);
-      const statusStr = (result.status || result.error || "?").toString().padEnd(6);
-      const latStr = `${result.latency}ms`.padStart(7);
-      console.log(`  ${label.padEnd(22)} ${C.gray}${pathStr}${C.reset} ${statusStr} ${C.gray}${latStr}${C.reset}`);
-
-      if (severity === "CRITICAL") {
-        crashed = true;
-        console.log(`\n  ${C.bold}${C.red}🚨 CRASH DETECTED! Server is down!${C.reset}`);
-        break;
-      }
-
-      await new Promise((r) => setTimeout(r, DELAY_MS));
-    }
-
-    if (crashed) break;
-  }
-
-  // ── Summary ──────────────────────────────────────────────────────────────
-  console.log(`\n\n${C.bold}${C.cyan}╔══════════════════════════════════════════════╗`);
-  console.log(`║                  SUMMARY                    ║`);
-  console.log(`╚══════════════════════════════════════════════╝${C.reset}\n`);
-
-  const total = results.length;
-  console.log(`Total payloads sent : ${total}`);
-  console.log(`${C.red}CRITICAL (crash)    : ${findings.CRITICAL.length}${C.reset}`);
-  console.log(`${C.red}HIGH (500/timeout)  : ${findings.HIGH.length}${C.reset}`);
-  console.log(`${C.yellow}MEDIUM (400)        : ${findings.MEDIUM.length}${C.reset}`);
-  console.log(`${C.cyan}LOW (404/redirect)  : ${findings.LOW.length}${C.reset}`);
-  console.log(`INFO (handled)      : ${findings.INFO.length}`);
-
-  // ── Notable findings ──
-  const notable = results.filter((r) => ["CRITICAL", "HIGH", "MEDIUM"].includes(r.severity));
-  if (notable.length > 0) {
-    console.log(`\n${C.bold}Notable Findings:${C.reset}`);
-    notable.forEach((r) => {
-      console.log(`  ${r.label}  ${C.yellow}${r.path}${C.reset}  → ${r.status || r.error}`);
-    });
-  } else {
-    console.log(`\n${C.green}✔ No critical findings. Server handles all payloads gracefully.${C.reset}`);
-  }
-
-  // ── Save output ──
-  if (OUTPUT_FILE) {
-    fs.writeFileSync(OUTPUT_FILE, JSON.stringify({ target: TARGET, results, findings }, null, 2));
-    console.log(`\n${C.gray}Results saved to: ${OUTPUT_FILE}${C.reset}`);
-  }
-
-  console.log();
-}
-
-fuzz().catch((e) => {
-  console.error("Fuzzer error:", e.message);
-  process.exit(1);
-});
+      - name: 📂 Archive Detailed Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-security-report
+          path: audit-log.json
