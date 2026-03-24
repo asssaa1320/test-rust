@@ -14,35 +14,40 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1. تحميل v8 (d8) مباشرة من Google Storage (أسرع وأضمن)
-      - name: Install v8 (d8)
+      # 1. تثبيت jsvu وتشغيلها بطريقة إجبارية (Force)
+      - name: Install v8 via jsvu (Non-Interactive)
         run: |
-          # تحميل أحدث نسخة مستقرة من d8 لنظام لينكس
-          curl -fLO https://storage.googleapis.com/chromium-v8/built-ins/x64.release/d8.zip
-          sudo apt-get install -y unzip
-          unzip d8.zip -d v8_bin
-          # إضافة المجلد للمسار
-          echo "$(pwd)/v8_bin" >> $GITHUB_PATH
-          # إعطاء صلاحيات التنفيذ
-          chmod +x v8_bin/d8
+          npm install -g jsvu
+          # إرسال الاختيارات يدوياً (الخيار 3 عادة هو Linux 64-bit)
+          # ثم تحديد محرك v8 فقط
+          echo "3
+          v8" | jsvu
+          
+          # إضافة المسار للمستقبل
+          echo "$HOME/.jsvu/bin" >> $GITHUB_PATH
 
       # 2. تشغيل الـ PoC ومقارنة النتائج
       - name: Execute PoC Comparison
         run: |
-          # التأكد من أن d8 متاح
-          export PATH="$(pwd)/v8_bin:$PATH"
+          # التأكد من المسار محلياً للخطوة الحالية
+          export PATH="$HOME/.jsvu/bin:$PATH"
           
-          if ! command -v d8 &> /dev/null; then
-            echo "Error: d8 (v8) not found even after direct install"
+          # jsvu تنزل الملف باسم v8 أو v8-debug
+          V8_EXEC=$(command -v v8 || command -v v8-debug)
+          
+          if [ -z "$V8_EXEC" ]; then
+            echo "Error: V8 engine not found. Checking directory content:"
+            ls -R $HOME/.jsvu/bin || echo "Bin folder empty"
             exit 1
           fi
 
+          echo "Using V8 from: $V8_EXEC"
+
           echo "Running Baseline (Jitless)..."
-          d8 --jitless poc_vuln06_trigger.js > baseline.txt
+          $V8_EXEC --jitless poc_vuln06_trigger.js > baseline.txt
           
           echo "Running Maglev (Trigger)..."
-          # استخدام d8 بدلاً من v8 وتمرير flags الـ Maglev
-          d8 --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
+          $V8_EXEC --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
           
           echo "Comparing Outputs..."
           if diff baseline.txt maglev.txt; then
