@@ -1,85 +1,60 @@
-name: Autonomous Security & Testing Engine
+name: V8 Bug Research & Auto-Verify
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  # يسمح لك بتشغيل الورك فلو يدوياً في أي وقت
   workflow_dispatch: 
 
 jobs:
-  # المرحلة الأولى: فحص أمن الكود والبيانات الحساسة
-  static_analysis:
-    name: Code & Secret Auditing
+  v8-poc-test:
+    name: Execute & Compare PoC
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Secret Scanning (TruffleHog)
+      # 1. تثبيت d8 (V8 Shell) لتشغيل الـ JS
+      - name: Install v8-d8
+        run: |
+          sudo apt-get update
+          # تثبيت أدوات المساعدة لتشغيل محركات JS
+          npm install -g jsvu
+          jsvu --engines=v8
+          echo "~/.jsvu/bin" >> $GITHUB_PATH
+
+      # 2. تشغيل الـ PoC في وضعين (Jitless vs Maglev) ومقارنة النتائج
+      - name: Execute PoC Comparison
+        run: |
+          echo "Running Baseline (Jitless)..."
+          v8 --jitless poc_vuln06_trigger.js > baseline.txt
+          
+          echo "Running Maglev (Trigger)..."
+          v8 --maglev --maglev-filter=* poc_vuln06_trigger.js > maglev.txt
+          
+          echo "Comparing Outputs..."
+          if diff baseline.txt maglev.txt; then
+            echo "✅ No mismatch detected in output."
+          else
+            echo "❌ MISMATCH DETECTED! Potential JIT Corruption."
+            diff baseline.txt maglev.txt
+            exit 1
+          fi
+
+      # 3. فحص الكود بحثاً عن الـ Secrets (TruffleHog)
+      - name: Secret Scanning
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
+          head: ${{ github.sha }}
+          base: ""
 
-      - name: Python Security Audit (Bandit)
-        run: |
-          pip install bandit
-          bandit -r . -ll -ii -f txt -o bandit_report.txt || true
-
-      - name: Archive Static Reports
+      # 4. رفع التقارير في حال الفشل
+      - name: Upload Logs on Failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: static-analysis-reports
-          path: bandit_report.txt
-
-  # المرحلة الثانية: التشغيل الآلي والاختبار (Dynamic Execution)
-  dynamic_testing:
-    name: Autonomous Execution Test
-    needs: static_analysis
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Environment
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Install Dependencies
-        run: |
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install pytest pytest-cov
-
-      # هنا نقوم بتشغيل "Vortex" أو أي أداة لديك بشكل تجريبي
-      - name: Run Tool Sanity Check (Smoke Test)
-        run: |
-          # محاكاة تشغيل الأداة لمدة زمنية قصيرة للتأكد من عدم وجود Crash
-          timeout 60s python3 main.py --scan-local || echo "Initial test completed"
-
-      - name: Run Automated Unit Tests
-        run: |
-          # تشغيل اختبارات الكود التلقائية مع تقرير التغطية
-          pytest --cov=./ --cov-report=xml
-
-      - name: Upload Coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          file: ./coverage.xml
-
-  # المرحلة الثالثة: التنبيه في حال وجود مشاكل
-  notify:
-    name: Reporting & Alerts
-    needs: [static_analysis, dynamic_testing]
-    if: failure()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Report Failure
-        run: |
-          echo "Critical failure detected in the security pipeline."
-          # هنا يمكنك ربطها بـ Telegram Bot أو Discord Webhook إذا أردت
+          name: poc-mismatch-logs
+          path: |
+            baseline.txt
+            maglev.txt
